@@ -1,73 +1,70 @@
-name: Historical Backfill
+name: Archive Backfill
 
 # ---------------------------------------------------------------------------
-# Manual backfill of the pgsql-hackers archive into Neon Postgres.
+# Manually trigger a scrape + embed run from the GitHub Actions UI.
 #
-# Trigger via GitHub UI → Actions → "Historical Backfill" → Run workflow
+# Three ways to specify the range (in order of precedence):
 #
-# You can specify a range in three ways (in decreasing precedence):
+#   1. Single month   — set `month` to YYYY/MM  (e.g. 2025/03)
+#   2. Single year    — set `year`  to YYYY      (e.g. 2025)
+#   3. Year range     — set `from_year` + `to_year`  (e.g. 2021 → 2024)
 #
-#   1. Fine-grained:  from_period=2021/06  to_period=2023/12
-#   2. Year-range:    from_year=2021       to_year=2023
-#   3. Single year:   year=2024            (sets from/to to that year)
+# If more than one mode is filled in, the highest-precedence one wins.
 #
-# Rules:
-#   • fine-grained from_period / to_period override year inputs if provided
-#   • year input is a shorthand for from_year=year, to_year=year
-#   • from_year defaults to 2024, to_year defaults to from_year
-#
-# Secrets required (add under repo Settings → Secrets → Actions):
-#   DATABASE_URL_UNPOOLED   Neon unpooled connection string
+# Required repository secrets (Settings → Secrets → Actions):
+#   DATABASE_URL_UNPOOLED   Neon unpooled Postgres connection string
 #   DATABASE_URL            Neon pooled connection string (fallback)
-#   GROQ_API_KEY            (optional) used only if summarize=true
+#   GROQ_API_KEY            Optional — only needed when summarize=true
 # ---------------------------------------------------------------------------
 
 on:
   workflow_dispatch:
     inputs:
 
-      # ── Option 1: fine-grained period strings ──────────────────────────
-      from_period:
-        description: >
-          Start month (YYYY/MM). Overrides year inputs when set.
-          Example: 2021/06
+      # ── Mode 1: exact single month ────────────────────────────────────────
+      month:
+        description: "Single month  YYYY/MM  (e.g. 2025/03). Highest priority."
         required: false
         default: ""
 
-      to_period:
-        description: >
-          End month inclusive (YYYY/MM). Overrides year inputs when set.
-          Example: 2023/12
+      # ── Mode 2: whole year ────────────────────────────────────────────────
+      year:
+        description: "Whole year  YYYY  (e.g. 2025). Ignored when month is set."
         required: false
         default: ""
 
-      # ── Option 2: year-range ────────────────────────────────────────────
+      # ── Mode 3: year range ────────────────────────────────────────────────
       from_year:
-        description: >
-          Start year (4 digits). Used when from_period is empty.
-          Example: 2021
+        description: "Start year  YYYY  (e.g. 2021). Ignored when month or year is set."
         required: false
-        default: "2024"
+        default: ""
 
       to_year:
-        description: >
-          End year inclusive (4 digits). Defaults to from_year.
-          Example: 2023
+        description: "End year  YYYY  (e.g. 2024). Defaults to from_year when omitted."
         required: false
         default: ""
 
-      # ── Option 3: single year shorthand ────────────────────────────────
-      year:
-        description: >
-          Single year shorthand — sets both from_year and to_year.
-          Ignored if from_year / from_period are also set explicitly.
-          Example: 2024
+      # ── Pipeline options ──────────────────────────────────────────────────
+      skip_scrape:
+        description: "Skip scrape — re-embed a previously cached JSONL (useful if only embed failed)."
         required: false
-        default: ""
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
-      # ── Pipeline options ────────────────────────────────────────────────
+      summarize:
+        description: "Generate Groq AI thread summaries after ingestion."
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
       embedding_provider:
-        description: "Embedding backend"
+        description: "Embedding backend (fastembed = local, no API key needed)."
         required: false
         default: "fastembed"
         type: choice
@@ -75,99 +72,91 @@ on:
           - fastembed
           - openai
 
-      summarize:
-        description: "Generate Groq AI summaries after ingestion?"
-        required: false
-        default: "false"
-        type: choice
-        options:
-          - "false"
-          - "true"
-
-      skip_scrape:
-        description: >
-          Skip scrape step (re-embed a previously cached JSONL).
-          Useful if the scrape completed but embed failed.
-        required: false
-        default: "false"
-        type: choice
-        options:
-          - "false"
-          - "true"
-
 env:
   PYTHONUNBUFFERED: "1"
   PYTHONDONTWRITEBYTECODE: "1"
 
 jobs:
   backfill:
-    name: Backfill ${{ github.event.inputs.from_period || github.event.inputs.from_year || github.event.inputs.year || '2024' }} → ${{ github.event.inputs.to_period || github.event.inputs.to_year || github.event.inputs.year || github.event.inputs.from_year || '2024' }}
+    name: "Backfill archive"
     runs-on: ubuntu-latest
-    # GitHub Actions caps free-tier Linux jobs at 6 hours.
-    # Large year ranges may need to be split into multiple runs.
+    # GitHub free-tier cap is 6 h = 360 min; leave a 10-min buffer.
     timeout-minutes: 350
 
     steps:
-      # ── 1. Checkout ───────────────────────────────────────────────────────
+      # ── 1. Checkout ──────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. Python setup ───────────────────────────────────────────────────
+      # ── 2. Python setup ──────────────────────────────────────────────────
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
+          cache: pip
           cache-dependency-path: crawler/requirements.txt
 
       - name: Install Python dependencies
         working-directory: crawler
         run: pip install -r requirements.txt
 
-      # ── 3. Resolve period range ───────────────────────────────────────────
+      # ── 3. Cache fastembed model (~150 MB) ───────────────────────────────
+      - name: Restore fastembed model cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: fastembed-bge-small-en-v1.5
+
+      # ── 4. Resolve period range ──────────────────────────────────────────
       - name: Resolve period range
-        id: periods
+        id: range
         shell: bash
         run: |
-          FROM_P="${{ github.event.inputs.from_period }}"
-          TO_P="${{ github.event.inputs.to_period }}"
+          MONTH="${{ github.event.inputs.month }}"
+          YEAR="${{ github.event.inputs.year }}"
           FROM_Y="${{ github.event.inputs.from_year }}"
           TO_Y="${{ github.event.inputs.to_year }}"
-          SINGLE_Y="${{ github.event.inputs.year }}"
 
-          # Single-year shorthand takes lowest precedence
-          if [ -z "$FROM_P" ] && [ -z "$FROM_Y" ] && [ -n "$SINGLE_Y" ]; then
-            FROM_Y="$SINGLE_Y"
-            TO_Y="$SINGLE_Y"
-          fi
-
-          # If fine-grained not set, build from year inputs
-          if [ -z "$FROM_P" ]; then
-            FROM_Y="${FROM_Y:-2024}"
+          if [ -n "$MONTH" ]; then
+            # Mode 1: exact month
+            FROM_P="$MONTH"
+            TO_P="$MONTH"
+          elif [ -n "$YEAR" ]; then
+            # Mode 2: whole year
+            FROM_P="${YEAR}/01"
+            TO_P="${YEAR}/12"
+          elif [ -n "$FROM_Y" ]; then
+            # Mode 3: year range
             TO_Y="${TO_Y:-$FROM_Y}"
             FROM_P="${FROM_Y}/01"
             TO_P="${TO_Y}/12"
+          else
+            echo "::error::No range specified. Set 'month', 'year', or 'from_year'."
+            exit 1
           fi
 
           echo "from_period=$FROM_P" >> "$GITHUB_OUTPUT"
           echo "to_period=$TO_P"     >> "$GITHUB_OUTPUT"
-          echo ""
-          echo "=== Backfill range ==="
-          echo "  from : $FROM_P"
-          echo "  to   : $TO_P"
 
-      # ── 4. Restore cached JSONL (across retries / re-runs) ───────────────
+          echo "========================================="
+          echo "  Backfill range:  $FROM_P  →  $TO_P"
+          echo "  skip_scrape   :  ${{ github.event.inputs.skip_scrape }}"
+          echo "  summarize     :  ${{ github.event.inputs.summarize }}"
+          echo "  provider      :  ${{ github.event.inputs.embedding_provider }}"
+          echo "========================================="
+
+      # ── 5. Restore JSONL cache (lets embed be retried without re-scraping) ─
       - name: Restore crawl output cache
         if: github.event.inputs.skip_scrape != 'true'
         uses: actions/cache/restore@v4
         with:
           path: crawler/output
-          # Use a stable key so a retry of the same run can resume
-          key: backfill-${{ steps.periods.outputs.from_period }}-${{ steps.periods.outputs.to_period }}-${{ github.run_id }}
+          # Try the exact run first, then any prior run for the same range
+          key: backfill-${{ steps.range.outputs.from_period }}-${{ steps.range.outputs.to_period }}-${{ github.run_id }}
           restore-keys: |
-            backfill-${{ steps.periods.outputs.from_period }}-${{ steps.periods.outputs.to_period }}-
+            backfill-${{ steps.range.outputs.from_period }}-${{ steps.range.outputs.to_period }}-
 
-      # ── 5. Scrape ─────────────────────────────────────────────────────────
+      # ── 6. Scrape ────────────────────────────────────────────────────────
       - name: Scrape archive
         if: github.event.inputs.skip_scrape != 'true'
         working-directory: crawler
@@ -176,21 +165,20 @@ jobs:
           DATABASE_URL:          ${{ secrets.DATABASE_URL }}
           GROQ_API_KEY:          ${{ secrets.GROQ_API_KEY }}
         run: |
-          FROM="${{ steps.periods.outputs.from_period }}"
-          TO="${{ steps.periods.outputs.to_period }}"
-
-          echo "Scraping $FROM → $TO"
+          FROM="${{ steps.range.outputs.from_period }}"
+          TO="${{ steps.range.outputs.to_period }}"
+          echo "Scraping  $FROM  →  $TO"
           python main.py scrape --from "$FROM" --to "$TO"
 
-      # ── 6. Save JSONL cache (so embed can be retried without re-scraping) ─
+      # ── 7. Persist JSONL so embed can be retried without re-scraping ─────
       - name: Save crawl output cache
         if: github.event.inputs.skip_scrape != 'true'
         uses: actions/cache/save@v4
         with:
           path: crawler/output
-          key: backfill-${{ steps.periods.outputs.from_period }}-${{ steps.periods.outputs.to_period }}-${{ github.run_id }}
+          key: backfill-${{ steps.range.outputs.from_period }}-${{ steps.range.outputs.to_period }}-${{ github.run_id }}
 
-      # ── 7. Embed + ingest into Neon ───────────────────────────────────────
+      # ── 8. Embed + ingest into Neon ──────────────────────────────────────
       - name: Embed and ingest into Neon
         working-directory: crawler
         env:
@@ -202,17 +190,30 @@ jobs:
         run: |
           PROVIDER="${{ github.event.inputs.embedding_provider }}"
           SUMMARIZE="${{ github.event.inputs.summarize }}"
+          FROM="${{ steps.range.outputs.from_period }}"
 
-          echo "Embedding with provider: $PROVIDER"
+          echo "Embedding  (provider=$PROVIDER  summarize=$SUMMARIZE  from=$FROM)"
 
+          ARGS="--provider $PROVIDER --from $FROM"
           if [ "$SUMMARIZE" = "true" ]; then
-            python main.py embed --provider "$PROVIDER" --summarize
-          else
-            python main.py embed --provider "$PROVIDER"
+            ARGS="$ARGS --summarize"
           fi
 
-      # ── 8. Status report ──────────────────────────────────────────────────
+          python main.py embed $ARGS
+
+      # ── 9. Upload dropped.jsonl as artifact if any URLs were dropped ─────
+      - name: Upload dropped URLs artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dropped-urls-${{ steps.range.outputs.from_period }}-${{ steps.range.outputs.to_period }}
+          path: crawler/output/dropped.jsonl
+          if-no-files-found: ignore
+          retention-days: 30
+
+      # ── 10. Status summary ───────────────────────────────────────────────
       - name: Print crawl status
+        if: always()
         working-directory: crawler
         env:
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}

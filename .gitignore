@@ -31,13 +31,23 @@ crawler/**/*.pyc
 crawler/*.pyo
 
 # Crawler output (can be huge — hundreds of MB of JSONL)
+# Covers both crawler/output/ and any accidentally nested crawler/crawler/output/
 crawler/output/
+crawler/**/output/
 
 # Crawler logs
 crawler/logs/
+crawler/**/logs/
+
+# Crawl state and dropped-URL files — never commit these
+crawl_state.json
+dropped.jsonl
+**/crawl_state.json
+**/dropped.jsonl
 
 # fastembed model cache (downloaded on first run, ~150 MB)
 crawler/.fastembed_cache/
+crawler/**/fastembed_cache/
 crawler/models/
 
 # ─── OS ───────────────────────────────────────────────────────────────────────
