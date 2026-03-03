@@ -7,12 +7,13 @@ _env_file = Path(__file__).parent.parent / ".env"
 load_dotenv(_env_file)
 
 BASE_URL = "https://www.postgresql.org/list/pgsql-hackers"
-CRAWL_DELAY_SECONDS = 1.2        # be polite to the PostgreSQL servers
+CRAWL_DELAY_SECONDS = 1.5        # pre-request polite delay (seconds)
 MAX_CONCURRENT_REQUESTS = 3      # conservative parallelism
 MAX_CONCURRENT_MONTHS = 2        # crawl 2 months in parallel
-MAX_RETRIES = 5
+MAX_RETRIES = 5                  # max attempts before dropping
 REQUEST_TIMEOUT = 30
-RETRY_DELAY_BASE = 1.0
+RETRY_WAITS = [2, 3, 5, 8, 15]  # seconds to wait before each retry attempt
+DROPPED_PATH = "output/dropped.jsonl"  # URLs that failed all retries
 
 OUTPUT_DIR = "output"
 OUTPUT_JSON_PATH = os.path.join(OUTPUT_DIR, "emails.jsonl")

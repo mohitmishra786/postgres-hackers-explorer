@@ -21,18 +21,13 @@ from urllib.parse import unquote
 import httpx
 from bs4 import BeautifulSoup
 from bs4.element import NavigableString
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
 from config import (
     CRAWL_DELAY_SECONDS,
     MAX_CONCURRENT_REQUESTS,
     MAX_RETRIES,
-    RETRY_DELAY_BASE,
+    RETRY_WAITS,
+    DROPPED_PATH,
     START_MONTH,
     START_YEAR,
 )
@@ -61,24 +56,54 @@ def get_semaphore() -> asyncio.Semaphore:
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
-@retry(
-    stop=stop_after_attempt(MAX_RETRIES),
-    wait=wait_exponential(multiplier=RETRY_DELAY_BASE, min=1, max=30),
-    retry=retry_if_exception_type(
-        (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPStatusError)
-    ),
-)
+async def _write_dropped(url: str, reason: str) -> None:
+    """Append a permanently-failed URL to output/dropped.jsonl."""
+    import json, os
+    os.makedirs(os.path.dirname(DROPPED_PATH), exist_ok=True)
+    record = json.dumps({"url": url, "reason": reason, "ts": datetime.now(tz=timezone.utc).isoformat()})
+    with open(DROPPED_PATH, "a") as f:
+        f.write(record + "\n")
+
+
 async def fetch_with_retry(client: httpx.AsyncClient, url: str) -> str:
-    async with get_semaphore():
-        import time
-        t0 = time.monotonic()
-        response = await client.get(url)
-        elapsed = round(time.monotonic() - t0, 2)
-        response.raise_for_status()
-        logger.info("fetched_url", url=url, status=response.status_code, elapsed_s=elapsed)
-        if CRAWL_DELAY_SECONDS > 0:
+    """
+    Fetch url with up to MAX_RETRIES=5 attempts.
+    Waits CRAWL_DELAY_SECONDS before each attempt (polite delay).
+    On transient failure waits RETRY_WAITS[attempt] seconds before next try.
+    If all attempts fail, writes to dropped.jsonl and raises.
+    """
+    import time
+    last_exc: Exception = RuntimeError("no attempts made")
+
+    for attempt in range(MAX_RETRIES):
+        async with get_semaphore():
+            # Polite pre-request delay on every attempt
             await asyncio.sleep(CRAWL_DELAY_SECONDS)
-        return response.text
+            try:
+                t0 = time.monotonic()
+                response = await client.get(url)
+                elapsed = round(time.monotonic() - t0, 2)
+                response.raise_for_status()
+                logger.info("fetched_url", url=url, status=response.status_code, elapsed_s=elapsed)
+                return response.text
+            except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPStatusError) as exc:
+                last_exc = exc
+                wait = RETRY_WAITS[attempt] if attempt < len(RETRY_WAITS) else RETRY_WAITS[-1]
+                logger.warning(
+                    "fetch_failed_retrying",
+                    url=url,
+                    attempt=attempt + 1,
+                    max=MAX_RETRIES,
+                    wait_s=wait,
+                    error=str(exc),
+                )
+        # Wait outside the semaphore so we don't block other requests
+        await asyncio.sleep(wait)
+
+    # All retries exhausted — record as dropped
+    await _write_dropped(url, str(last_exc))
+    logger.error("fetch_permanently_failed", url=url, error=str(last_exc))
+    raise last_exc
 
 
 # ---------------------------------------------------------------------------
