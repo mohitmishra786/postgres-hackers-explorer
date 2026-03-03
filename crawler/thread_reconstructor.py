@@ -27,7 +27,15 @@ def reconstruct_threads(emails: list[dict]) -> list[dict]:
                 # Cycle detected — treat current as root
                 break
             visited.add(mid)
+
+            # Prefer In-Reply-To; fall back to last References entry (RFC 2822: last
+            # entry in References is the immediate parent, even when In-Reply-To is absent).
             parent_id = current.get("in_reply_to")
+            if not parent_id:
+                refs = current.get("references") or []
+                if refs:
+                    parent_id = refs[-1]
+
             if not parent_id or parent_id not in by_id:
                 break
             current = by_id[parent_id]

@@ -72,7 +72,13 @@ export default function SearchPage() {
         {result.subject}
       </Link>
       <div className="text-[11px] text-[#004d14]">
-        <span className="text-[#00cc33]">[{result.author_name ?? "unknown"}]</span>
+        <Link
+          href={`/authors/${encodeURIComponent(result.author_name ?? "unknown")}`}
+          className="text-[#00cc33] hover:underline"
+          onClick={(e) => e.stopPropagation()}
+        >
+          [{result.author_name ?? "unknown"}]
+        </Link>
         {" · "}
         {formatDate(result.date)}
         {result.has_patch && (

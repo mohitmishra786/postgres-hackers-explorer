@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Email } from "@/lib/db";
 import { formatDate, buildGitUrl } from "@/lib/utils";
 import CodeBlock from "./CodeBlock";
+import Link from "next/link";
 
 interface EmailBodyProps {
   email: Email;
@@ -188,7 +189,12 @@ export default function EmailBody({ email, showMeta = true }: EmailBodyProps) {
         <div className="mb-3 pb-3 border-b border-[#1a2e1a] space-y-1 text-[12px]">
           <div>
             <span className="text-[#004d14]">from: </span>
-            <span className="text-[#00cc33]">[{email.author_name ?? "unknown"}]</span>
+            <Link
+              href={`/authors/${encodeURIComponent(email.author_name ?? "unknown")}`}
+              className="text-[#00cc33] hover:underline"
+            >
+              [{email.author_name ?? "unknown"}]
+            </Link>
           </div>
           <div>
             <span className="text-[#004d14]">date: </span>

@@ -67,7 +67,7 @@ export async function POST(req: NextRequest) {
         FROM emails
         WHERE
           embedding IS NOT NULL
-          AND 1 - (embedding <=> ${embeddingLiteral}::vector) > 0.25
+          AND 1 - (embedding <=> ${embeddingLiteral}::vector) > 0.15
           AND (${filters.date_from ?? null}::timestamptz IS NULL OR date >= ${filters.date_from ?? null}::timestamptz)
           AND (${filters.date_to ?? null}::timestamptz IS NULL OR date <= ${filters.date_to ?? null}::timestamptz)
           AND (${filters.author ?? null} IS NULL OR author_name ILIKE ${"%" + (filters.author ?? "") + "%"})

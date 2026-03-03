@@ -71,9 +71,13 @@ export default function AIAnswer({ answer, sources, queryId }: AIAnswerProps) {
                     {source.subject}
                   </div>
                   <div className="text-[11px] text-[#004d14] mt-0.5">
-                    <span className="text-[#00cc33]">
+                    <Link
+                      href={`/authors/${encodeURIComponent(source.author_name ?? "unknown")}`}
+                      onClick={(e) => e.stopPropagation()}
+                      className="text-[#00cc33] hover:underline"
+                    >
                       [{source.author_name ?? "unknown"}]
-                    </span>
+                    </Link>
                     {" · "}
                     {formatDate(source.date)}
                   </div>

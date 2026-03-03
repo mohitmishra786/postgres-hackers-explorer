@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Patch } from "@/lib/db";
 import { formatDate } from "@/lib/utils";
 import CodeBlock from "./CodeBlock";
+import Link from "next/link";
 
 interface PatchViewerProps {
   patches: Patch[];
@@ -60,7 +61,13 @@ export default function PatchViewer({ patches }: PatchViewerProps) {
             </span>
             {activePatch.author_name && (
               <span className="text-[#004d14]">
-                by: <span className="text-[#00cc33]">[{activePatch.author_name}]</span>
+                by:{" "}
+                <Link
+                  href={`/authors/${encodeURIComponent(activePatch.author_name)}`}
+                  className="text-[#00cc33] hover:underline"
+                >
+                  [{activePatch.author_name}]
+                </Link>
               </span>
             )}
             {activePatch.submitted_at && (

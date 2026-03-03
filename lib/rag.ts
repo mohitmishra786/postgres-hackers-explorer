@@ -63,7 +63,7 @@ async function vectorSearch(
         1 - (embedding <=> ${embeddingLiteral}::vector) AS similarity
       FROM emails
       WHERE
-        1 - (embedding <=> ${embeddingLiteral}::vector) > 0.25
+        1 - (embedding <=> ${embeddingLiteral}::vector) > 0.15
         AND embedding IS NOT NULL
         AND (${filters.date_from ?? null}::timestamptz IS NULL OR date >= ${filters.date_from ?? null}::timestamptz)
         AND (${filters.date_to ?? null}::timestamptz IS NULL OR date <= ${filters.date_to ?? null}::timestamptz)
@@ -108,12 +108,12 @@ async function keywordSearch(
         has_patch, patch_version,
         ts_rank(
           to_tsvector('english', coalesce(subject,'') || ' ' || coalesce(body_new_content,'')),
-          plainto_tsquery('english', ${query})
+          websearch_to_tsquery('english', ${query})
         ) AS rank
       FROM emails
       WHERE
         to_tsvector('english', coalesce(subject,'') || ' ' || coalesce(body_new_content,''))
-          @@ plainto_tsquery('english', ${query})
+          @@ websearch_to_tsquery('english', ${query})
         AND (${filters.date_from ?? null}::timestamptz IS NULL OR date >= ${filters.date_from ?? null}::timestamptz)
         AND (${filters.date_to ?? null}::timestamptz IS NULL OR date <= ${filters.date_to ?? null}::timestamptz)
         AND (${filters.author ?? null} IS NULL OR author_name ILIKE ${"%" + (filters.author ?? "") + "%"})
@@ -247,7 +247,7 @@ async function expandThreads(
 
 function formatEmailForContext(email: Email, index: number): string {
   const body = email.body_new_content || email.body_clean || "(no body)";
-  const truncatedBody = body.slice(0, 1500);
+  const truncatedBody = body.slice(0, 2500);
   return `--- Email ${index + 1} ---
 From: ${email.author_name ?? "Unknown"} <${email.author_email ?? ""}>
 Date: ${email.date}
@@ -255,7 +255,7 @@ Subject: ${email.subject}
 ${email.has_patch ? `[PATCH${email.patch_version ? ` ${email.patch_version}` : ""}]` : ""}
 ${email.source_url ? `URL: ${email.source_url}` : ""}
 
-${truncatedBody}${body.length > 1500 ? "\n[... truncated ...]" : ""}
+${truncatedBody}${body.length > 2500 ? "\n[... truncated ...]" : ""}
 `;
 }
 

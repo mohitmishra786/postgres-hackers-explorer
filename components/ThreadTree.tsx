@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { EmailNode } from "@/lib/db";
 import { formatDate } from "@/lib/utils";
 import EmailBody from "./EmailBody";
+import Link from "next/link";
 
 interface ThreadTreeProps {
   nodes: EmailNode[];
@@ -41,9 +42,13 @@ function ThreadNode({ node, depth, maxDepth, isLast, prefix }: ThreadNodeProps) 
             className="flex items-center gap-2 flex-wrap text-left w-full hover:bg-[#0a1a0a] px-1 py-0.5 rounded-none transition-colors"
             onClick={() => setBodyVisible(!bodyVisible)}
           >
-            <span className="text-[#00cc33] font-bold">
+            <Link
+              href={`/authors/${encodeURIComponent(node.author_name ?? "unknown")}`}
+              onClick={(e) => e.stopPropagation()}
+              className="text-[#00cc33] font-bold hover:underline"
+            >
               [{node.author_name ?? "unknown"}]
-            </span>
+            </Link>
             <span className="text-[#004d14] text-[11px]">
               {formatDate(node.date)}
             </span>

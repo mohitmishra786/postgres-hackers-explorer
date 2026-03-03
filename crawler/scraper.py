@@ -19,7 +19,8 @@ from typing import Optional
 from urllib.parse import unquote
 
 import httpx
-from bs4 import BeautifulSoup, NavigableString
+from bs4 import BeautifulSoup
+from bs4.element import NavigableString
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -282,6 +283,7 @@ def parse_email_page(html: str, url: str, month_period: str) -> Optional[RawEmai
         message_id         = ""
         in_reply_to: Optional[str] = None
         references_raw     = ""
+        references: list[str] = []
         date_str           = ""
 
         header_table = soup.find("table", class_=re.compile(r"message-header", re.I))
@@ -325,6 +327,18 @@ def parse_email_page(html: str, url: str, month_period: str) -> Optional[RawEmai
                 elif label == "references":
                     references_raw = td.get_text(separator=" ", strip=True)
 
+        # ── Thread select → in_reply_to + references (primary source) ────────
+        # The HTML page does NOT expose In-Reply-To or References as plain header
+        # rows.  Instead it renders a <select> dropdown in the [Thread:] row where
+        # every <option value="<url-encoded-id>"> lists all messages in the thread
+        # in order, with leading-space indentation encoding reply depth.
+        # This is the only machine-readable thread-structure available on the page.
+        thread_in_reply_to, thread_references = parse_thread_select(header_table)
+        if thread_in_reply_to and not in_reply_to:
+            in_reply_to = thread_in_reply_to
+        if thread_references and not references_raw:
+            references = thread_references  # already normalised message-ids
+
         # Fallback message_id from URL
         if not message_id:
             m3 = re.search(r"/message-id/(.+)$", url)
@@ -336,8 +350,9 @@ def parse_email_page(html: str, url: str, month_period: str) -> Optional[RawEmai
         # ── Date ─────────────────────────────────────────────────────────────
         date = parse_email_date(date_str) or datetime.now(tz=timezone.utc)
 
-        # ── References ───────────────────────────────────────────────────────
-        references = parse_references(references_raw)
+        # ── References (from header row — only if thread select didn't supply) ─
+        if not references:
+            references = parse_references(references_raw)
 
         # ── Body ─────────────────────────────────────────────────────────────
         message_content = soup.find("div", class_="message-content")
@@ -460,6 +475,91 @@ async def get_all_month_periods(
     periods.sort(key=lambda x: x[0])
     logger.info("found_month_periods", count=len(periods))
     return periods
+
+
+# ---------------------------------------------------------------------------
+# Thread dropdown parser
+# ---------------------------------------------------------------------------
+
+def parse_thread_select(header_table) -> tuple[Optional[str], list[str]]:
+    """
+    The [Thread:] row in the message-header table contains a <select> dropdown
+    where every <option value="<url-encoded-msg-id>"> lists every message in the
+    thread.  The currently-viewed message has selected="selected".
+
+    The leading-space indentation of the option text encodes reply depth:
+      0 spaces → root (depth 0)
+      2 spaces → depth 1 reply to nearest shallower ancestor
+      4 spaces → depth 2, etc.
+
+    We walk the ordered option list and, for each message, find its parent as
+    the closest preceding option whose indent is strictly smaller.
+
+    Returns:
+        in_reply_to  – normalised message-id of the direct parent of the
+                       currently-selected message (None if it is the root)
+        references   – ordered list of all ancestor message-ids from root → parent
+    """
+    if header_table is None:
+        return None, []
+
+    for row in header_table.find_all("tr"):
+        th = row.find("th")
+        td = row.find("td")
+        if not th or not td:
+            continue
+        if "thread" not in th.get_text(strip=True).lower():
+            continue
+
+        select = td.find("select")
+        if not select:
+            return None, []
+
+        options: list[tuple[str, int]] = []   # (message_id, leading_spaces)
+        selected_idx: Optional[int] = None
+
+        for i, opt in enumerate(select.find_all("option")):
+            raw_val = opt.get("value", "").strip()
+            if not raw_val:
+                continue
+            mid = normalise_message_id(unquote(raw_val))
+            # Count leading non-breaking spaces (\xa0) — the site uses 1 \xa0 per depth level.
+            text = opt.get_text("")          # raw text, keep leading whitespace
+            leading = len(text) - len(text.lstrip("\xa0"))
+            options.append((mid, leading))
+            if opt.get("selected"):
+                selected_idx = i
+
+        # Derive the indent unit from the smallest non-zero indent seen (defensive)
+        non_zero = [s for _, s in options if s > 0]
+        indent_unit = min(non_zero) if non_zero else 1
+
+        if selected_idx is None or not options:
+            return None, []
+
+        current_mid, current_spaces = options[selected_idx]
+        current_depth = current_spaces // indent_unit if indent_unit else current_spaces
+
+        if current_depth == 0:
+            # This is the root message — no parent
+            return None, []
+
+        # Walk backwards to find direct parent (nearest option with depth < current_depth)
+        parent_mid: Optional[str] = None
+        ancestors: list[str] = []
+        for j in range(selected_idx - 1, -1, -1):
+            mid_j, spaces_j = options[j]
+            depth_j = spaces_j // indent_unit if indent_unit else spaces_j
+            if depth_j < current_depth:
+                if parent_mid is None:
+                    parent_mid = mid_j
+                ancestors.insert(0, mid_j)
+                if depth_j == 0:
+                    break   # reached root
+
+        return parent_mid, ancestors
+
+    return None, []
 
 
 # ---------------------------------------------------------------------------
