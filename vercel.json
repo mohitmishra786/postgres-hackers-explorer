@@ -1,0 +1,6 @@
+{
+  "functions": {
+    "app/api/ask/route.ts": { "maxDuration": 60 },
+    "app/api/search/semantic/route.ts": { "maxDuration": 30 }
+  }
+}

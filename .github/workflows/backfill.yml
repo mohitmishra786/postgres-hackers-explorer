@@ -1,0 +1,220 @@
+name: Historical Backfill
+
+# ---------------------------------------------------------------------------
+# Manual backfill of the pgsql-hackers archive into Neon Postgres.
+#
+# Trigger via GitHub UI → Actions → "Historical Backfill" → Run workflow
+#
+# You can specify a range in three ways (in decreasing precedence):
+#
+#   1. Fine-grained:  from_period=2021/06  to_period=2023/12
+#   2. Year-range:    from_year=2021       to_year=2023
+#   3. Single year:   year=2024            (sets from/to to that year)
+#
+# Rules:
+#   • fine-grained from_period / to_period override year inputs if provided
+#   • year input is a shorthand for from_year=year, to_year=year
+#   • from_year defaults to 2024, to_year defaults to from_year
+#
+# Secrets required (add under repo Settings → Secrets → Actions):
+#   DATABASE_URL_UNPOOLED   Neon unpooled connection string
+#   DATABASE_URL            Neon pooled connection string (fallback)
+#   GROQ_API_KEY            (optional) used only if summarize=true
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+
+      # ── Option 1: fine-grained period strings ──────────────────────────
+      from_period:
+        description: >
+          Start month (YYYY/MM). Overrides year inputs when set.
+          Example: 2021/06
+        required: false
+        default: ""
+
+      to_period:
+        description: >
+          End month inclusive (YYYY/MM). Overrides year inputs when set.
+          Example: 2023/12
+        required: false
+        default: ""
+
+      # ── Option 2: year-range ────────────────────────────────────────────
+      from_year:
+        description: >
+          Start year (4 digits). Used when from_period is empty.
+          Example: 2021
+        required: false
+        default: "2024"
+
+      to_year:
+        description: >
+          End year inclusive (4 digits). Defaults to from_year.
+          Example: 2023
+        required: false
+        default: ""
+
+      # ── Option 3: single year shorthand ────────────────────────────────
+      year:
+        description: >
+          Single year shorthand — sets both from_year and to_year.
+          Ignored if from_year / from_period are also set explicitly.
+          Example: 2024
+        required: false
+        default: ""
+
+      # ── Pipeline options ────────────────────────────────────────────────
+      embedding_provider:
+        description: "Embedding backend"
+        required: false
+        default: "fastembed"
+        type: choice
+        options:
+          - fastembed
+          - openai
+
+      summarize:
+        description: "Generate Groq AI summaries after ingestion?"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+      skip_scrape:
+        description: >
+          Skip scrape step (re-embed a previously cached JSONL).
+          Useful if the scrape completed but embed failed.
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  backfill:
+    name: Backfill ${{ github.event.inputs.from_period || github.event.inputs.from_year || github.event.inputs.year || '2024' }} → ${{ github.event.inputs.to_period || github.event.inputs.to_year || github.event.inputs.year || github.event.inputs.from_year || '2024' }}
+    runs-on: ubuntu-latest
+    # GitHub Actions caps free-tier Linux jobs at 6 hours.
+    # Large year ranges may need to be split into multiple runs.
+    timeout-minutes: 350
+
+    steps:
+      # ── 1. Checkout ───────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python setup ───────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: crawler/requirements.txt
+
+      - name: Install Python dependencies
+        working-directory: crawler
+        run: pip install -r requirements.txt
+
+      # ── 3. Resolve period range ───────────────────────────────────────────
+      - name: Resolve period range
+        id: periods
+        shell: bash
+        run: |
+          FROM_P="${{ github.event.inputs.from_period }}"
+          TO_P="${{ github.event.inputs.to_period }}"
+          FROM_Y="${{ github.event.inputs.from_year }}"
+          TO_Y="${{ github.event.inputs.to_year }}"
+          SINGLE_Y="${{ github.event.inputs.year }}"
+
+          # Single-year shorthand takes lowest precedence
+          if [ -z "$FROM_P" ] && [ -z "$FROM_Y" ] && [ -n "$SINGLE_Y" ]; then
+            FROM_Y="$SINGLE_Y"
+            TO_Y="$SINGLE_Y"
+          fi
+
+          # If fine-grained not set, build from year inputs
+          if [ -z "$FROM_P" ]; then
+            FROM_Y="${FROM_Y:-2024}"
+            TO_Y="${TO_Y:-$FROM_Y}"
+            FROM_P="${FROM_Y}/01"
+            TO_P="${TO_Y}/12"
+          fi
+
+          echo "from_period=$FROM_P" >> "$GITHUB_OUTPUT"
+          echo "to_period=$TO_P"     >> "$GITHUB_OUTPUT"
+          echo ""
+          echo "=== Backfill range ==="
+          echo "  from : $FROM_P"
+          echo "  to   : $TO_P"
+
+      # ── 4. Restore cached JSONL (across retries / re-runs) ───────────────
+      - name: Restore crawl output cache
+        if: github.event.inputs.skip_scrape != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: crawler/output
+          # Use a stable key so a retry of the same run can resume
+          key: backfill-${{ steps.periods.outputs.from_period }}-${{ steps.periods.outputs.to_period }}-${{ github.run_id }}
+          restore-keys: |
+            backfill-${{ steps.periods.outputs.from_period }}-${{ steps.periods.outputs.to_period }}-
+
+      # ── 5. Scrape ─────────────────────────────────────────────────────────
+      - name: Scrape archive
+        if: github.event.inputs.skip_scrape != 'true'
+        working-directory: crawler
+        env:
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          DATABASE_URL:          ${{ secrets.DATABASE_URL }}
+          GROQ_API_KEY:          ${{ secrets.GROQ_API_KEY }}
+        run: |
+          FROM="${{ steps.periods.outputs.from_period }}"
+          TO="${{ steps.periods.outputs.to_period }}"
+
+          echo "Scraping $FROM → $TO"
+          python main.py scrape --from "$FROM" --to "$TO"
+
+      # ── 6. Save JSONL cache (so embed can be retried without re-scraping) ─
+      - name: Save crawl output cache
+        if: github.event.inputs.skip_scrape != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: crawler/output
+          key: backfill-${{ steps.periods.outputs.from_period }}-${{ steps.periods.outputs.to_period }}-${{ github.run_id }}
+
+      # ── 7. Embed + ingest into Neon ───────────────────────────────────────
+      - name: Embed and ingest into Neon
+        working-directory: crawler
+        env:
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          DATABASE_URL:          ${{ secrets.DATABASE_URL }}
+          GROQ_API_KEY:          ${{ secrets.GROQ_API_KEY }}
+          OPENAI_API_KEY:        ${{ secrets.OPENAI_API_KEY }}
+          EMBEDDING_PROVIDER:    ${{ github.event.inputs.embedding_provider }}
+        run: |
+          PROVIDER="${{ github.event.inputs.embedding_provider }}"
+          SUMMARIZE="${{ github.event.inputs.summarize }}"
+
+          echo "Embedding with provider: $PROVIDER"
+
+          if [ "$SUMMARIZE" = "true" ]; then
+            python main.py embed --provider "$PROVIDER" --summarize
+          else
+            python main.py embed --provider "$PROVIDER"
+          fi
+
+      # ── 8. Status report ──────────────────────────────────────────────────
+      - name: Print crawl status
+        working-directory: crawler
+        env:
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          DATABASE_URL:          ${{ secrets.DATABASE_URL }}
+        run: python main.py status

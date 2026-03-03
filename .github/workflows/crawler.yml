@@ -1,0 +1,133 @@
+name: Daily Crawler
+
+on:
+  schedule:
+    # Run daily at 03:00 UTC (low traffic time)
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "Crawler command to run"
+        required: true
+        default: "incremental"
+        type: choice
+        options:
+          - incremental
+          - embed
+          - summarize
+          - status
+      from_period:
+        description: "Start from period YYYY/MM (optional, used with embed)"
+        required: false
+        default: ""
+      embedding_provider:
+        description: "Embedding provider"
+        required: false
+        default: "fastembed"
+        type: choice
+        options:
+          - fastembed
+          - openai
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  crawl-and-ingest:
+    name: Crawl + Embed pgsql-hackers
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: crawler/requirements.txt
+
+      - name: Install Python dependencies
+        working-directory: crawler
+        run: pip install -r requirements.txt
+
+      - name: Restore crawl output cache
+        uses: actions/cache@v4
+        with:
+          path: crawler/output
+          key: crawler-output-${{ github.run_id }}
+          restore-keys: |
+            crawler-output-
+
+      - name: Run incremental crawl
+        working-directory: crawler
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EMBEDDING_PROVIDER: fastembed
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            COMMAND="${{ github.event.inputs.command }}"
+          else
+            COMMAND="incremental"
+          fi
+
+          echo "Running: python main.py $COMMAND"
+
+          case "$COMMAND" in
+            incremental)
+              python main.py incremental
+              ;;
+            embed)
+              FROM="${{ github.event.inputs.from_period }}"
+              PROVIDER="${{ github.event.inputs.embedding_provider }}"
+              if [ -n "$FROM" ]; then
+                python main.py embed --provider "$PROVIDER" --from "$FROM"
+              else
+                python main.py embed --provider "$PROVIDER"
+              fi
+              ;;
+            summarize)
+              python main.py summarize
+              ;;
+            status)
+              python main.py status
+              ;;
+            *)
+              echo "Unknown command: $COMMAND"
+              exit 1
+              ;;
+          esac
+
+      - name: Embed newly crawled emails
+        if: github.event_name == 'schedule' || github.event.inputs.command == 'incremental'
+        working-directory: crawler
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EMBEDDING_PROVIDER: fastembed
+        run: |
+          # Get the month from 2 days ago so we pick up any stragglers
+          FROM_PERIOD=$(date -d "2 days ago" +%Y/%m 2>/dev/null || date -v-2d +%Y/%m)
+          echo "Embedding emails from: $FROM_PERIOD"
+          python main.py embed --from "$FROM_PERIOD"
+
+      - name: Print status
+        working-directory: crawler
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python main.py status
+
+      - name: Save crawl output cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: crawler/output
+          key: crawler-output-${{ github.run_id }}

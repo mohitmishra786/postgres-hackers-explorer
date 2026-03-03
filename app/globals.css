@@ -1,0 +1,353 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&display=swap');
+@import 'highlight.js/styles/github-dark.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================
+   Root CSS variables — retro terminal palette
+   ============================================================ */
+:root {
+  --bg: #0a0a0a;
+  --surface: #111111;
+  --border: #1a2e1a;
+  --primary: #00ff41;
+  --secondary: #00cc33;
+  --muted: #004d14;
+  --text: #ccffcc;
+  --accent: #ffffff;
+  --error: #ff4444;
+  --warning: #ffaa00;
+}
+
+/* ============================================================
+   Base reset
+   ============================================================ */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+  font-size: 14px;
+  line-height: 1.6;
+  min-height: 100vh;
+  overflow-x: hidden;
+  /* Subtle green noise texture overlay using CSS */
+  background-image:
+    radial-gradient(ellipse at 20% 50%, rgba(0, 255, 65, 0.03) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 20%, rgba(0, 255, 65, 0.02) 0%, transparent 50%);
+}
+
+/* ============================================================
+   CRT scanline effect — fixed overlay on entire page
+   ============================================================ */
+body::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 9999;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.08) 2px,
+    rgba(0, 0, 0, 0.08) 4px
+  );
+}
+
+/* ============================================================
+   Typography
+   ============================================================ */
+h1, h2, h3, h4, h5, h6 {
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--primary);
+  font-weight: 700;
+}
+
+a {
+  color: var(--secondary);
+  text-decoration: none;
+  transition: color 0.1s ease;
+}
+
+a:hover {
+  color: var(--primary);
+  text-decoration: underline;
+}
+
+code, pre {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* ============================================================
+   Scrollbar styling
+   ============================================================ */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--surface);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--muted);
+  border-radius: 0;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--secondary);
+}
+
+/* ============================================================
+   Utility classes
+   ============================================================ */
+
+/* Blinking cursor */
+.blink {
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* CRT card glow */
+.retro-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 0 5px rgba(0, 255, 65, 0.1), inset 0 0 20px rgba(0, 0, 0, 0.5);
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.retro-card:hover {
+  border-color: var(--secondary);
+  box-shadow: 0 0 10px rgba(0, 255, 65, 0.2), inset 0 0 20px rgba(0, 0, 0, 0.5);
+}
+
+.retro-card-active {
+  border-color: var(--primary);
+  box-shadow: 0 0 10px rgba(0, 255, 65, 0.3), 0 0 20px rgba(0, 255, 65, 0.1);
+}
+
+/* Terminal input */
+.retro-input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--primary);
+  font-family: 'JetBrains Mono', monospace;
+  outline: none;
+  caret-color: var(--primary);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.retro-input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 8px rgba(0, 255, 65, 0.3);
+}
+
+.retro-input::placeholder {
+  color: var(--muted);
+}
+
+/* Retro button */
+.retro-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--secondary);
+  font-family: 'JetBrains Mono', monospace;
+  cursor: pointer;
+  transition: all 0.1s ease;
+  padding: 4px 12px;
+}
+
+.retro-btn:hover {
+  background: var(--muted);
+  border-color: var(--primary);
+  color: var(--primary);
+  box-shadow: 0 0 6px rgba(0, 255, 65, 0.2);
+}
+
+.retro-btn-active {
+  background: var(--muted);
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+/* Status badges */
+.badge-committed {
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  font-size: 11px;
+  padding: 1px 6px;
+}
+
+.badge-in-review {
+  color: var(--warning);
+  border: 1px solid var(--warning);
+  font-size: 11px;
+  padding: 1px 6px;
+}
+
+.badge-patch {
+  color: #00ffff;
+  border: 1px solid #00ffff;
+  font-size: 11px;
+  padding: 1px 6px;
+}
+
+.badge-discussion {
+  color: var(--muted);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  padding: 1px 6px;
+}
+
+/* Diff highlighting */
+.diff-added {
+  background: rgba(0, 255, 65, 0.1);
+  color: var(--primary);
+}
+
+.diff-removed {
+  background: rgba(255, 68, 68, 0.1);
+  color: var(--error);
+}
+
+.diff-header {
+  background: rgba(0, 150, 255, 0.1);
+  color: #66ccff;
+  font-weight: bold;
+}
+
+/* Tree lines */
+.tree-line {
+  color: var(--muted);
+  font-family: 'JetBrains Mono', monospace;
+  user-select: none;
+}
+
+/* Loading dots animation */
+.loading-dots::after {
+  content: '';
+  animation: loading-dots 1.5s infinite;
+}
+
+@keyframes loading-dots {
+  0% { content: ''; }
+  25% { content: '.'; }
+  50% { content: '..'; }
+  75% { content: '...'; }
+  100% { content: ''; }
+}
+
+/* Green text glow */
+.text-glow {
+  text-shadow: 0 0 8px var(--primary);
+}
+
+/* Phosphor screen flicker — very subtle */
+.screen-flicker {
+  animation: flicker 8s infinite;
+}
+
+@keyframes flicker {
+  0%, 19%, 21%, 23%, 25%, 54%, 56%, 100% {
+    opacity: 0.97;
+  }
+  20%, 24%, 55% {
+    opacity: 0.94;
+  }
+}
+
+/* Typewriter text reveal */
+.typewriter {
+  overflow: hidden;
+  white-space: nowrap;
+  animation: typewriter 1.5s steps(40, end) forwards;
+}
+
+@keyframes typewriter {
+  from { width: 0; }
+  to { width: 100%; }
+}
+
+/* ============================================================
+   highlight.js — retro terminal overrides
+   Keep the github-dark token colours but force our background
+   ============================================================ */
+.hljs {
+  background: transparent !important;
+  color: var(--text) !important;
+  font-family: 'JetBrains Mono', monospace !important;
+  font-size: 12px !important;
+}
+
+/* Markdown content in AI answers */
+.prose-retro {
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.prose-retro h1,
+.prose-retro h2,
+.prose-retro h3 {
+  color: var(--primary);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+  margin-bottom: 12px;
+}
+
+.prose-retro code {
+  background: rgba(0, 255, 65, 0.08);
+  border: 1px solid var(--border);
+  padding: 1px 4px;
+  font-size: 0.9em;
+  color: var(--primary);
+}
+
+.prose-retro pre {
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--border);
+  padding: 12px;
+  overflow-x: auto;
+}
+
+.prose-retro blockquote {
+  border-left: 3px solid var(--muted);
+  padding-left: 12px;
+  color: var(--secondary);
+  margin: 8px 0;
+}
+
+.prose-retro a {
+  color: var(--secondary);
+  text-decoration: underline;
+}
+
+.prose-retro strong {
+  color: var(--accent);
+}
+
+.prose-retro ul,
+.prose-retro ol {
+  padding-left: 20px;
+}
+
+.prose-retro li {
+  margin: 4px 0;
+}
