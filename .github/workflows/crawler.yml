@@ -62,13 +62,21 @@ jobs:
           restore-keys: |
             crawler-output-
 
-      - name: Run incremental crawl
+      - name: Compute current month period
+        id: period
+        run: |
+          # Current month in YYYY/MM format — used for incremental crawl & embed
+          CURRENT_MONTH=$(date -u +%Y/%m)
+          echo "current_month=$CURRENT_MONTH" >> "$GITHUB_OUTPUT"
+          echo "Current month: $CURRENT_MONTH"
+
+      - name: Run crawler command
         working-directory: crawler
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           EMBEDDING_PROVIDER: fastembed
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -77,11 +85,15 @@ jobs:
             COMMAND="incremental"
           fi
 
-          echo "Running: python main.py $COMMAND"
+          echo "Running command: $COMMAND"
 
           case "$COMMAND" in
             incremental)
-              python main.py incremental
+              # Only crawl the current month — previously crawled months are already in Neon.
+              # The scraper is idempotent (upsert), so re-running the current month is safe.
+              MONTH="${{ steps.period.outputs.current_month }}"
+              echo "Scraping current month only: $MONTH"
+              python main.py scrape --only "$MONTH"
               ;;
             embed)
               FROM="${{ github.event.inputs.from_period }}"
@@ -104,25 +116,25 @@ jobs:
               ;;
           esac
 
-      - name: Embed newly crawled emails
+      - name: Embed current month emails
         if: github.event_name == 'schedule' || github.event.inputs.command == 'incremental'
         working-directory: crawler
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           EMBEDDING_PROVIDER: fastembed
         run: |
-          # Get the month from 2 days ago so we pick up any stragglers
-          FROM_PERIOD=$(date -d "2 days ago" +%Y/%m 2>/dev/null || date -v-2d +%Y/%m)
-          echo "Embedding emails from: $FROM_PERIOD"
-          python main.py embed --from "$FROM_PERIOD"
+          MONTH="${{ steps.period.outputs.current_month }}"
+          echo "Embedding emails from current month: $MONTH"
+          python main.py embed --from "$MONTH"
 
       - name: Print status
+        if: always()
         working-directory: crawler
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python main.py status
 
       - name: Save crawl output cache

@@ -6,8 +6,6 @@ import { getDb } from "@/lib/db";
 import { cacheGet, cacheSet } from "@/lib/ratelimit";
 
 const MAX_PER_PAGE = 20;
-// Deep OFFSET on a FTS query is a full re-scan every time.
-// Cap at 1000 rows (50 pages × 20) — beyond this, users should refine filters.
 const MAX_OFFSET = 1_000;
 
 const querySchema = z.object({
@@ -48,7 +46,7 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const cacheKey = `pghackers:kw:${q}:${page}:${per_page}:${date_from ?? ""}:${date_to ?? ""}:${author ?? ""}`;
+    const cacheKey = `pghackers:kw2:${q}:${page}:${per_page}:${date_from ?? ""}:${date_to ?? ""}:${author ?? ""}`;
     const cached = await cacheGet<{ results: unknown[]; total: number }>(cacheKey);
     if (cached) {
       return NextResponse.json({
@@ -63,41 +61,44 @@ export async function GET(req: NextRequest) {
 
     const sql = getDb();
 
-    // Run data fetch and count in parallel
+    // Use sql.query(string, params[]) to build dynamic WHERE clauses.
+    // The tagged-template form passes all interpolated values as typed parameters,
+    // but Postgres cannot infer the type of bare null params (error 42P18).
+    // sql.query() with explicit $N placeholders and a params array avoids this.
+    const params: unknown[] = [q];
+    const extraClauses: string[] = [];
+
+    if (date_from) { params.push(date_from); extraClauses.push(`date >= $${params.length}::timestamptz`); }
+    if (date_to)   { params.push(date_to);   extraClauses.push(`date <= $${params.length}::timestamptz`); }
+    if (author)    { params.push(`%${author}%`); extraClauses.push(`author_name ILIKE $${params.length}`); }
+
+    const whereExtra = extraClauses.length > 0 ? " AND " + extraClauses.join(" AND ") : "";
+
+    const tsvec = `to_tsvector('english', coalesce(subject,'') || ' ' || coalesce(body_new_content,''))`;
+    const tsq   = `websearch_to_tsquery('english', $1)`;
+
     const [rows, countRows] = await Promise.all([
-      sql`
-        SELECT
-          id, message_id, subject, author_name, author_email, date,
-          source_url, thread_root_id, thread_depth, has_patch, patch_version,
-          ts_rank(
-            to_tsvector('english', coalesce(subject,'') || ' ' || coalesce(body_new_content,'')),
-            plainto_tsquery('english', ${q})
-          ) AS rank
-        FROM emails
-        WHERE
-          to_tsvector('english', coalesce(subject,'') || ' ' || coalesce(body_new_content,''))
-            @@ plainto_tsquery('english', ${q})
-          AND (${date_from ?? null}::timestamptz IS NULL OR date >= ${date_from ?? null}::timestamptz)
-          AND (${date_to ?? null}::timestamptz IS NULL OR date <= ${date_to ?? null}::timestamptz)
-          AND (${author ?? null} IS NULL OR author_name ILIKE ${"%" + (author ?? "") + "%"})
-        ORDER BY rank DESC
-        LIMIT ${per_page} OFFSET ${offset}
-      `,
-      sql`
-        SELECT COUNT(*)::int AS total
-        FROM emails
-        WHERE
-          to_tsvector('english', coalesce(subject,'') || ' ' || coalesce(body_new_content,''))
-            @@ plainto_tsquery('english', ${q})
-          AND (${date_from ?? null}::timestamptz IS NULL OR date >= ${date_from ?? null}::timestamptz)
-          AND (${date_to ?? null}::timestamptz IS NULL OR date <= ${date_to ?? null}::timestamptz)
-          AND (${author ?? null} IS NULL OR author_name ILIKE ${"%" + (author ?? "") + "%"})
-      `,
+      sql.query(
+        `SELECT id, message_id, subject, author_name, author_email, date,
+                body_new_content, source_url, thread_root_id, thread_depth,
+                has_patch, patch_version,
+                ts_rank(${tsvec}, ${tsq}) AS rank
+         FROM emails
+         WHERE ${tsvec} @@ ${tsq}${whereExtra}
+         ORDER BY rank DESC
+         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        [...params, per_page, offset]
+      ),
+      sql.query(
+        `SELECT COUNT(*)::int AS total FROM emails
+         WHERE ${tsvec} @@ ${tsq}${whereExtra}`,
+        params
+      ),
     ]);
 
-    const total = (countRows[0] as { total: number })?.total ?? 0;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const total = (countRows as any[])[0]?.total ?? 0;
 
-    // Cache 1 hour — keyword results over historical data are stable
     await cacheSet(cacheKey, { results: rows, total }, 3600);
 
     return NextResponse.json({

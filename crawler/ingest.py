@@ -417,23 +417,14 @@ def rebuild_thread_stats_neon(emails: list[dict], conn: psycopg2.extensions.conn
 # Thread summarization — Groq llama-3.1-8b-instant (free tier)
 # ---------------------------------------------------------------------------
 
-SUMMARY_PROMPT = """You are summarizing a PostgreSQL pgsql-hackers mailing list discussion thread.
+SUMMARY_PROMPT = """Summarize this pgsql-hackers thread in 2-3 sentences. Cover: what it's about, main positions, and outcome/status.
 
-Thread subject: {subject}
-Number of emails: {count}
-Date range: {start} to {end}
-Participants: {names}
+Subject: {subject}
+Participants ({count} emails): {names}
 
-Email contents (new content only, no quoted text):
 {concatenated_new_content}
 
-Write a 3 to 5 sentence summary that covers:
-1. What the thread is about (the feature, bug, or change being discussed)
-2. The main positions or arguments made
-3. Whether consensus was reached or the discussion is ongoing
-4. Any specific PostgreSQL version targets or commitfest references mentioned
-
-Be factual and concise. Do not editorialize."""
+Summary:"""
 
 
 async def summarize_thread_groq(thread_emails: list[dict]) -> Optional[str]:
@@ -442,35 +433,37 @@ async def summarize_thread_groq(thread_emails: list[dict]) -> Optional[str]:
 
     thread_sorted = sorted(thread_emails, key=lambda e: e.get("date", ""))
     subject = thread_sorted[0].get("subject", "")
-    names = list({e.get("author_name", "Unknown") for e in thread_sorted})[:10]
-    start_str = thread_sorted[0].get("date", "")
-    end_str = thread_sorted[-1].get("date", "")
+    names = list({e.get("author_name", "Unknown") for e in thread_sorted})[:6]
 
+    # Keep prompt small: ~1500 chars of content max (≈375 tokens) + overhead ≈ 500 tokens total
     content_parts: list[str] = []
     total_chars = 0
     for e in thread_sorted:
-        body = e.get("body_new_content", "") or ""
-        if total_chars + len(body) > 12000:
-            remaining = 12000 - total_chars
-            if remaining > 100:
-                content_parts.append(f"[{e.get('author_name', '?')}]: {body[:remaining]}...")
+        body = (e.get("body_new_content", "") or "").strip()
+        if not body:
+            continue
+        if total_chars + len(body) > 1500:
+            remaining = 1500 - total_chars
+            if remaining > 80:
+                content_parts.append(f"[{e.get('author_name', '?')}]: {body[:remaining]}…")
             break
         content_parts.append(f"[{e.get('author_name', '?')}]: {body}")
         total_chars += len(body)
 
+    if not content_parts:
+        return None
+
     prompt = SUMMARY_PROMPT.format(
         subject=subject,
         count=len(thread_emails),
-        start=start_str,
-        end=end_str,
         names=", ".join(names),
-        concatenated_new_content="\n\n---\n\n".join(content_parts),
+        concatenated_new_content="\n\n".join(content_parts),
     )
 
     try:
         response = await groq_client.chat.completions.create(
             model=GROQ_SUMMARY_MODEL,
-            max_tokens=512,
+            max_tokens=200,  # short summary, keep token cost low
             messages=[{"role": "user", "content": prompt}],
         )
         return response.choices[0].message.content if response.choices else None
@@ -488,22 +481,61 @@ async def generate_thread_summaries(emails: list[dict], conn: psycopg2.extension
 
     logger.info("generating_thread_summaries", thread_count=len(threads))
 
+    # Groq free-tier limits for llama-3.1-8b-instant:
+    #   TPM: 6,000  |  TPD: 500,000  |  RPM: 30
+    # We use ~800 tokens per request (prompt ~600 + completion 512 max).
+    # Safe rate: 1 request every 3s ≈ 20 RPM, ~16K TPM — well within TPM limit.
+    # We also track estimated tokens per minute and pause when approaching limit.
+    INTER_REQUEST_DELAY = 3.0     # seconds between requests (≈20 RPM)
+    TPM_LIMIT = 5500              # conservative TPM limit (true limit 6000)
+    TOKENS_PER_REQUEST_EST = 800  # estimated tokens per summarize call
+    minute_token_bucket: list[tuple[float, int]] = []  # (timestamp, tokens)
+
+    def tokens_used_last_minute() -> int:
+        now = time.time()
+        cutoff = now - 60.0
+        # Prune old entries
+        while minute_token_bucket and minute_token_bucket[0][0] < cutoff:
+            minute_token_bucket.pop(0)
+        return sum(t for _, t in minute_token_bucket)
+
+    done = 0
+    skipped = 0
     with conn.cursor() as cur:
         for root_id, thread_emails in threads.items():
+            # Check if TPM budget is close to limit — if so, wait for the window to roll
+            used = tokens_used_last_minute()
+            if used + TOKENS_PER_REQUEST_EST > TPM_LIMIT:
+                wait_secs = 62  # wait just over a minute for bucket to reset
+                logger.info("tpm_throttle_wait", tokens_used_last_minute=used, wait_seconds=wait_secs)
+                await asyncio.sleep(wait_secs)
+                # Clear stale bucket entries
+                now = time.time()
+                while minute_token_bucket and minute_token_bucket[0][0] < now - 60.0:
+                    minute_token_bucket.pop(0)
+
             try:
                 summary = await summarize_thread_groq(thread_emails)
                 if not summary:
+                    skipped += 1
+                    await asyncio.sleep(INTER_REQUEST_DELAY)
                     continue
+                minute_token_bucket.append((time.time(), TOKENS_PER_REQUEST_EST))
                 cur.execute(
                     "UPDATE threads SET summary = %s WHERE root_message_id = %s",
                     (summary, root_id),
                 )
                 conn.commit()
+                done += 1
+                logger.info("summarized_thread", done=done, skipped=skipped, total=len(threads))
             except Exception as e:
                 conn.rollback()
                 logger.error("thread_summary_failed", root_id=root_id, error=str(e))
+                skipped += 1
 
-    logger.info("thread_summaries_complete")
+            await asyncio.sleep(INTER_REQUEST_DELAY)
+
+    logger.info("thread_summaries_complete", done=done, skipped=skipped)
 
 
 # ---------------------------------------------------------------------------

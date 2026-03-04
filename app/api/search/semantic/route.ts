@@ -6,9 +6,6 @@ import { generateEmbedding } from "@/lib/embeddings";
 import { getDb } from "@/lib/db";
 import { cacheGet, cacheSet } from "@/lib/ratelimit";
 
-// Semantic search is always a top-K operation — no deep pagination needed.
-// The model returns the top matches by cosine similarity; anything beyond
-// page 3 is well below the relevance threshold and not useful.
 const MAX_PER_PAGE = 20;
 const MAX_PAGE = 3;
 
@@ -42,12 +39,11 @@ export async function POST(req: NextRequest) {
     }
 
     const { query, page, per_page, filters } = parsed.data;
+    const { date_from, date_to, author } = filters;
     const offset = (page - 1) * per_page;
-    // Fetch enough results upfront to support pagination without re-embedding
     const fetchLimit = MAX_PAGE * MAX_PER_PAGE; // 60 max
 
-    // Cache by query + filters (embedding is deterministic for same text)
-    const cacheKey = `pghackers:sem:${query}:${per_page}:${filters.date_from ?? ""}:${filters.date_to ?? ""}:${filters.author ?? ""}`;
+    const cacheKey = `pghackers:sem2:${query}:${per_page}:${date_from ?? ""}:${date_to ?? ""}:${author ?? ""}`;
     const cached = await cacheGet<{ all_results: unknown[] }>(cacheKey);
 
     let allResults: unknown[];
@@ -56,32 +52,44 @@ export async function POST(req: NextRequest) {
       allResults = cached.all_results;
     } else {
       const embedding = await generateEmbedding(query);
+
+      if (!embedding || embedding.length === 0) {
+        console.error("[API /search/semantic] Empty embedding returned from HuggingFace");
+        return NextResponse.json({ error: "Embedding service unavailable" }, { status: 503 });
+      }
+
       const embeddingLiteral = `[${embedding.join(",")}]`;
       const sql = getDb();
 
-      const rows = await sql`
-        SELECT
-          id, message_id, subject, author_name, author_email, date,
-          source_url, thread_root_id, thread_depth, has_patch, patch_version,
-          1 - (embedding <=> ${embeddingLiteral}::vector) AS similarity
-        FROM emails
-        WHERE
-          embedding IS NOT NULL
-          AND 1 - (embedding <=> ${embeddingLiteral}::vector) > 0.15
-          AND (${filters.date_from ?? null}::timestamptz IS NULL OR date >= ${filters.date_from ?? null}::timestamptz)
-          AND (${filters.date_to ?? null}::timestamptz IS NULL OR date <= ${filters.date_to ?? null}::timestamptz)
-          AND (${filters.author ?? null} IS NULL OR author_name ILIKE ${"%" + (filters.author ?? "") + "%"})
-        ORDER BY embedding <=> ${embeddingLiteral}::vector
-        LIMIT ${fetchLimit}
-      `;
+      // Use sql.query() with explicit $N params to avoid Postgres error 42P18
+      // (cannot determine data type of bare null parameter in tagged-template form).
+      const params: unknown[] = [embeddingLiteral, fetchLimit];
+      const extraClauses: string[] = [];
+
+      if (date_from) { params.push(date_from); extraClauses.push(`date >= $${params.length}::timestamptz`); }
+      if (date_to)   { params.push(date_to);   extraClauses.push(`date <= $${params.length}::timestamptz`); }
+      if (author)    { params.push(`%${author}%`); extraClauses.push(`author_name ILIKE $${params.length}`); }
+
+      const whereExtra = extraClauses.length > 0 ? " AND " + extraClauses.join(" AND ") : "";
+
+      const rows = await sql.query(
+        `SELECT id, message_id, subject, author_name, author_email, date,
+                source_url, thread_root_id, thread_depth, has_patch, patch_version,
+                1 - (embedding <=> $1::vector) AS similarity
+         FROM emails
+         WHERE embedding IS NOT NULL
+           AND 1 - (embedding <=> $1::vector) > 0.1${whereExtra}
+         ORDER BY embedding <=> $1::vector
+         LIMIT $2`,
+        params
+      );
 
       allResults = rows;
-      // Cache the full result set for 30 minutes — same query = same embedding = same results
       await cacheSet(cacheKey, { all_results: allResults }, 1800);
     }
 
     const total = allResults.length;
-    const results = allResults.slice(offset, offset + per_page);
+    const results = (allResults as unknown[]).slice(offset, offset + per_page);
 
     return NextResponse.json({
       results,

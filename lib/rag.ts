@@ -49,37 +49,40 @@ async function vectorSearch(
   filters: SearchFilters,
   limit = 15
 ): Promise<EmailWithSimilarity[]> {
-  const sql = getDb();
+  if (!queryEmbedding || queryEmbedding.length === 0) {
+    console.warn("[RAG] Empty embedding, skipping vector search");
+    return [];
+  }
 
-  // Format the embedding as a Postgres vector literal: '[0.1,0.2,...]'
+  const sql = getDb();
   const embeddingLiteral = `[${queryEmbedding.join(",")}]`;
 
-  try {
-    const rows = await sql`
-      SELECT
-        id, message_id, subject, author_name, author_email, date,
-        body_new_content, source_url, thread_root_id, thread_depth,
-        has_patch, patch_version,
-        1 - (embedding <=> ${embeddingLiteral}::vector) AS similarity
-      FROM emails
-      WHERE
-        1 - (embedding <=> ${embeddingLiteral}::vector) > 0.15
-        AND embedding IS NOT NULL
-        AND (${filters.date_from ?? null}::timestamptz IS NULL OR date >= ${filters.date_from ?? null}::timestamptz)
-        AND (${filters.date_to ?? null}::timestamptz IS NULL OR date <= ${filters.date_to ?? null}::timestamptz)
-        AND (${filters.author ?? null} IS NULL OR author_name ILIKE ${"%" + (filters.author ?? "") + "%"})
-      ORDER BY embedding <=> ${embeddingLiteral}::vector
-      LIMIT ${limit}
-    `;
+  // Use sql.query() with explicit $N params to avoid Postgres error 42P18
+  const params: unknown[] = [embeddingLiteral, limit];
+  const extraClauses: string[] = [];
+  if (filters.date_from) { params.push(filters.date_from); extraClauses.push(`date >= $${params.length}::timestamptz`); }
+  if (filters.date_to)   { params.push(filters.date_to);   extraClauses.push(`date <= $${params.length}::timestamptz`); }
+  if (filters.author)    { params.push(`%${filters.author}%`); extraClauses.push(`author_name ILIKE $${params.length}`); }
+  const whereExtra = extraClauses.length > 0 ? " AND " + extraClauses.join(" AND ") : "";
 
+  try {
+    const rows = await sql.query(
+      `SELECT id, message_id, subject, author_name, author_email, date,
+              body_new_content, source_url, thread_root_id, thread_depth,
+              has_patch, patch_version,
+              1 - (embedding <=> $1::vector) AS similarity
+       FROM emails
+       WHERE embedding IS NOT NULL
+         AND 1 - (embedding <=> $1::vector) > 0.1${whereExtra}
+       ORDER BY embedding <=> $1::vector
+       LIMIT $2`,
+      params
+    );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return (rows as any[]).map((row) => ({
       ...row,
-      in_reply_to: null,
-      references_ids: [],
-      body_clean: null,
-      month_period: null,
-      git_commit_refs: null,
+      in_reply_to: null, references_ids: [], body_clean: null,
+      month_period: null, git_commit_refs: null,
       created_at: new Date().toISOString(),
       similarity: Number(row.similarity),
     })) as EmailWithSimilarity[];
@@ -100,35 +103,33 @@ async function keywordSearch(
 ): Promise<EmailWithSimilarity[]> {
   const sql = getDb();
 
-  try {
-    const rows = await sql`
-      SELECT
-        id, message_id, subject, author_name, author_email, date,
-        body_new_content, source_url, thread_root_id, thread_depth,
-        has_patch, patch_version,
-        ts_rank(
-          to_tsvector('english', coalesce(subject,'') || ' ' || coalesce(body_new_content,'')),
-          websearch_to_tsquery('english', ${query})
-        ) AS rank
-      FROM emails
-      WHERE
-        to_tsvector('english', coalesce(subject,'') || ' ' || coalesce(body_new_content,''))
-          @@ websearch_to_tsquery('english', ${query})
-        AND (${filters.date_from ?? null}::timestamptz IS NULL OR date >= ${filters.date_from ?? null}::timestamptz)
-        AND (${filters.date_to ?? null}::timestamptz IS NULL OR date <= ${filters.date_to ?? null}::timestamptz)
-        AND (${filters.author ?? null} IS NULL OR author_name ILIKE ${"%" + (filters.author ?? "") + "%"})
-      ORDER BY rank DESC
-      LIMIT ${limit}
-    `;
+  const params: unknown[] = [query, limit];
+  const extraClauses: string[] = [];
+  if (filters.date_from) { params.push(filters.date_from); extraClauses.push(`date >= $${params.length}::timestamptz`); }
+  if (filters.date_to)   { params.push(filters.date_to);   extraClauses.push(`date <= $${params.length}::timestamptz`); }
+  if (filters.author)    { params.push(`%${filters.author}%`); extraClauses.push(`author_name ILIKE $${params.length}`); }
+  const whereExtra = extraClauses.length > 0 ? " AND " + extraClauses.join(" AND ") : "";
 
+  const tsvec = `to_tsvector('english', coalesce(subject,'') || ' ' || coalesce(body_new_content,''))`;
+  const tsq   = `websearch_to_tsquery('english', $1)`;
+
+  try {
+    const rows = await sql.query(
+      `SELECT id, message_id, subject, author_name, author_email, date,
+              body_new_content, source_url, thread_root_id, thread_depth,
+              has_patch, patch_version,
+              ts_rank(${tsvec}, ${tsq}) AS rank
+       FROM emails
+       WHERE ${tsvec} @@ ${tsq}${whereExtra}
+       ORDER BY rank DESC
+       LIMIT $2`,
+      params
+    );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return (rows as any[]).map((row) => ({
       ...row,
-      in_reply_to: null,
-      references_ids: [],
-      body_clean: null,
-      month_period: null,
-      git_commit_refs: null,
+      in_reply_to: null, references_ids: [], body_clean: null,
+      month_period: null, git_commit_refs: null,
       created_at: new Date().toISOString(),
       rank: Number(row.rank),
     })) as EmailWithSimilarity[];
@@ -195,27 +196,25 @@ async function expandThreads(
     if (!rootId) continue;
 
     try {
-      const threadEmails = await sql`
-        SELECT * FROM emails
-        WHERE thread_root_id = ${rootId}
-        ORDER BY date ASC
-        LIMIT ${MAX_PER_THREAD + 5}
-      ` as unknown as Email[];
+      const threadEmails = await sql.query(
+        `SELECT * FROM emails WHERE thread_root_id = $1 ORDER BY date ASC LIMIT $2`,
+        [rootId, MAX_PER_THREAD + 5]
+      ) as unknown as Email[];
 
       if (threadEmails.length <= MAX_PER_THREAD) {
         for (const te of threadEmails) allEmails.set(te.message_id, te);
       } else {
         // Large thread: pick most relevant via inner vector search
-        const relevant = await sql`
-          SELECT message_id,
-            1 - (embedding <=> ${embeddingLiteral}::vector) AS similarity
-          FROM emails
-          WHERE thread_root_id = ${rootId}
-            AND embedding IS NOT NULL
-            AND 1 - (embedding <=> ${embeddingLiteral}::vector) > 0.1
-          ORDER BY embedding <=> ${embeddingLiteral}::vector
-          LIMIT ${MAX_RELEVANT_WITHIN_THREAD}
-        ` as unknown as { message_id: string; similarity: number }[];
+        const relevant = await sql.query(
+          `SELECT message_id, 1 - (embedding <=> $1::vector) AS similarity
+           FROM emails
+           WHERE thread_root_id = $2
+             AND embedding IS NOT NULL
+             AND 1 - (embedding <=> $1::vector) > 0.1
+           ORDER BY embedding <=> $1::vector
+           LIMIT $3`,
+          [embeddingLiteral, rootId, MAX_RELEVANT_WITHIN_THREAD]
+        ) as unknown as { message_id: string; similarity: number }[];
 
         const relevantIds = new Set(relevant.map((r) => r.message_id));
 

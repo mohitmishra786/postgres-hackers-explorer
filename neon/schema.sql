@@ -283,6 +283,11 @@ BEGIN
   FROM emails
   WHERE thread_root_id = root_id;
 
+  -- Skip if no emails found for this root (root was dropped / not yet scraped)
+  IF v_subject IS NULL THEN
+    RETURN;
+  END IF;
+
   INSERT INTO threads (
     root_message_id, subject, participant_count, message_count,
     date_start, date_end, has_patches, patch_count, updated_at

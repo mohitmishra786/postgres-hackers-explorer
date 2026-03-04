@@ -17,14 +17,24 @@ async function hfEmbed(texts: string[]): Promise<number[][]> {
   };
   if (hfToken) headers["Authorization"] = `Bearer ${hfToken}`;
 
-  const response = await fetch(HF_API_URL, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      inputs: texts,
-      options: { wait_for_model: true },
-    }),
-  });
+  // 25s timeout — HF model can be cold-starting (takes up to 20s)
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 25000);
+
+  let response: Response;
+  try {
+    response = await fetch(HF_API_URL, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        inputs: texts,
+        options: { wait_for_model: true },
+      }),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   if (!response.ok) {
     const err = await response.text();
@@ -36,13 +46,18 @@ async function hfEmbed(texts: string[]): Promise<number[][]> {
   const json = await response.json();
 
   // HF returns number[][] when inputs is an array of strings
-  if (Array.isArray(json) && Array.isArray(json[0])) {
+  if (Array.isArray(json) && Array.isArray(json[0]) && typeof json[0][0] === "number") {
     return json as number[][];
   }
 
   // Single string input returned as number[]
   if (Array.isArray(json) && typeof json[0] === "number") {
     return [json as number[]];
+  }
+
+  // Sometimes HF wraps in an extra nesting level: [[[...]]]
+  if (Array.isArray(json) && Array.isArray(json[0]) && Array.isArray(json[0][0])) {
+    return (json as number[][][]).map((v) => v[0]);
   }
 
   throw new Error(`Unexpected HuggingFace response shape: ${JSON.stringify(json).slice(0, 200)}`);
