@@ -6,9 +6,12 @@ import ScanlineOverlay from "@/components/ScanlineOverlay";
 import { Analytics } from "@vercel/analytics/next";
 
 export const metadata: Metadata = {
-  title: "pghackers.com — PostgreSQL Hackers Explorer",
+  title: {
+    default: "pghackers.dev — PostgreSQL Hackers Explorer",
+    template: "%s | pghackers.dev",
+  },
   description:
-    "AI-powered reader and explorer for the pgsql-hackers mailing list archive. Browse threads, patches, and ask questions with RAG.",
+    "Terminal-style AI-powered reader for the pgsql-hackers mailing list archive. Search 700k+ emails, explore threads, patches, and ask questions with RAG.",
   keywords: [
     "postgresql",
     "pgsql-hackers",
@@ -16,7 +19,31 @@ export const metadata: Metadata = {
     "postgres",
     "patches",
     "commitfest",
+    "database",
+    "open source",
+    "RAG",
+    "AI search",
   ],
+  metadataBase: new URL("https://pghackers.dev"),
+  openGraph: {
+    title: "pghackers.dev — PostgreSQL Hackers Explorer",
+    description:
+      "AI-powered search and exploration of the pgsql-hackers mailing list archive. Browse 700k+ emails, threads, and patches.",
+    type: "website",
+    url: "https://pghackers.dev",
+    siteName: "pghackers.dev",
+  },
+  twitter: {
+    card: "summary",
+    title: "pghackers.dev — PostgreSQL Hackers Explorer",
+    description:
+      "AI-powered search and exploration of the pgsql-hackers mailing list archive.",
+  },
+  themeColor: "#00ff41",
+  icons: {
+    icon: "/icon",
+    apple: "/apple-icon",
+  },
 };
 
 export default function RootLayout({
