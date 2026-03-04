@@ -1,6 +1,6 @@
 # Postgres Hackers Explorer
 
-![Project Image](https://via.placeholder.com/1200x600?text=Postgres+Hackers+Explorer)
+![Project Image](assets/pghackers.png)
 
 An AI-powered reader and explorer for the [pgsql-hackers](https://lists.postgresql.org/pgsql-hackers/) mailing list archive.
 
