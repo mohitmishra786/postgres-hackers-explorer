@@ -3,6 +3,7 @@ import "./globals.css";
 import Sidebar from "@/components/Sidebar";
 import StatusBar from "@/components/StatusBar";
 import ScanlineOverlay from "@/components/ScanlineOverlay";
+import { Analytics } from "@vercel/analytics/next";
 
 export const metadata: Metadata = {
   title: "pghackers.com — PostgreSQL Hackers Explorer",
@@ -52,6 +53,7 @@ export default function RootLayout({
 
         {/* Fixed status bar */}
         <StatusBar />
+        <Analytics />
       </body>
     </html>
   );
