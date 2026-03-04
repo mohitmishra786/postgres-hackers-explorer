@@ -31,8 +31,7 @@ This project addresses that problem by providing:
 - [Features](FEATURES.md) - Detailed feature list
 - [Setup](SETUP.md) - Installation and development guide
 - [API](API.md) - API endpoints reference
-- [Deployment](DEPLOYMENT.md) - Production deployment guide
 
 ## License
 
-MIT
+AGPL-3.0
