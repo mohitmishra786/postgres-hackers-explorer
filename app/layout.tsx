@@ -7,8 +7,8 @@ import { Analytics } from "@vercel/analytics/next";
 
 export const metadata: Metadata = {
   title: {
-    default: "pghackers.dev — PostgreSQL Hackers Explorer",
-    template: "%s | pghackers.dev",
+    default: "pghackers.com — PostgreSQL Hackers Explorer",
+    template: "%s | pghackers.com",
   },
   description:
     "Terminal-style AI-powered reader for the pgsql-hackers mailing list archive. Search 700k+ emails, explore threads, patches, and ask questions with RAG.",
@@ -24,18 +24,18 @@ export const metadata: Metadata = {
     "RAG",
     "AI search",
   ],
-  metadataBase: new URL("https://pghackers.dev"),
+  metadataBase: new URL("https://pghackers.com"),
   openGraph: {
-    title: "pghackers.dev — PostgreSQL Hackers Explorer",
+    title: "pghackers.com — PostgreSQL Hackers Explorer",
     description:
       "AI-powered search and exploration of the pgsql-hackers mailing list archive. Browse 700k+ emails, threads, and patches.",
     type: "website",
-    url: "https://pghackers.dev",
-    siteName: "pghackers.dev",
+    url: "https://pghackers.com",
+    siteName: "pghackers.com",
   },
   twitter: {
     card: "summary",
-    title: "pghackers.dev — PostgreSQL Hackers Explorer",
+    title: "pghackers.com — PostgreSQL Hackers Explorer",
     description:
       "AI-powered search and exploration of the pgsql-hackers mailing list archive.",
   },
