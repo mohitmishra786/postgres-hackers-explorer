@@ -22,7 +22,7 @@ export default function Sidebar() {
         <Link href="/" className="block">
           <div className="text-[#00ff41] font-bold text-lg leading-tight">
             pghackers
-            <span className="text-[#004d14]">.dev</span>
+            <span className="text-[#004d14]">.com</span>
           </div>
           <div className="text-[11px] text-[#004d14] mt-1">
             pgsql-hackers explorer
@@ -42,10 +42,9 @@ export default function Sidebar() {
               href={item.href}
               className={`
                 flex items-center gap-2 px-3 py-2 text-sm transition-all duration-100
-                ${
-                  isActive
-                    ? "text-[#00ff41] bg-[#004d14] border-l-2 border-[#00ff41]"
-                    : "text-[#00cc33] hover:text-[#00ff41] hover:bg-[#0a1a0a] border-l-2 border-transparent"
+                ${isActive
+                  ? "text-[#00ff41] bg-[#004d14] border-l-2 border-[#00ff41]"
+                  : "text-[#00cc33] hover:text-[#00ff41] hover:bg-[#0a1a0a] border-l-2 border-transparent"
                 }
               `}
             >
