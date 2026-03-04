@@ -73,7 +73,7 @@ export async function GET(req: NextRequest) {
     const total = (countRows[0] as { total: number })?.total ?? 0;
 
     // Cache 5 minutes — commitfest status can change
-    await cacheSet(cacheKey, { threads, total }, 300);
+    await cacheSet(cacheKey, { threads, total }, 7200);
 
     return NextResponse.json({
       threads,

@@ -9,6 +9,7 @@ interface Stats {
   total_threads: number;
   total_patches: number;
   date_end: string | null;
+  last_synced: string | null;
 }
 
 export default function StatusBar() {
@@ -66,11 +67,11 @@ export default function StatusBar() {
                 {formatNum(stats.total_patches)}
               </span>
             </span>
-            {stats.date_end && (
+            {stats.last_synced && (
               <span className="hidden lg:inline">
                 last sync:{" "}
                 <span className="text-[#00cc33]">
-                  {formatRelativeDate(stats.date_end)}
+                  {formatRelativeDate(stats.last_synced)}
                 </span>
               </span>
             )}

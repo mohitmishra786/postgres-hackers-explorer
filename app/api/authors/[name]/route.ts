@@ -124,7 +124,7 @@ export async function GET(
     };
 
     // Cache for 5 minutes
-    await cacheSet(cacheKey, profile, 300);
+    await cacheSet(cacheKey, profile, 7200);
 
     return NextResponse.json(profile);
   } catch (err) {

@@ -77,7 +77,7 @@ export async function GET(req: NextRequest) {
     const total = (countRows[0] as { total: number })?.total ?? 0;
 
     // Cache for 10 minutes — author stats update slowly
-    await cacheSet(cacheKey, { authors, total }, 600);
+    await cacheSet(cacheKey, { authors, total }, 7200);
 
     return NextResponse.json({
       authors,

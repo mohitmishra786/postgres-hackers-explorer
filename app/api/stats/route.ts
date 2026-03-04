@@ -14,7 +14,7 @@ export async function GET() {
 
     const sql = getDb();
 
-    const [counts, dateRange, patchCount] = await Promise.all([
+    const [counts, dateRange, patchCount, syncTime] = await Promise.all([
       sql`
         SELECT
           (SELECT COUNT(*)::int FROM emails)  AS total_emails,
@@ -32,6 +32,8 @@ export async function GET() {
         FROM threads
         WHERE has_patches = true
       `,
+      // last_synced = when the most recently inserted/updated row landed in the DB
+      sql`SELECT MAX(created_at) AS last_synced FROM emails`,
     ]);
 
     const stats = {
@@ -41,10 +43,12 @@ export async function GET() {
       total_patches: (patchCount[0] as { total_patches: number }).total_patches,
       date_start: (dateRange[0] as { date_start: string | null }).date_start,
       date_end: (dateRange[0] as { date_end: string | null }).date_end,
-      last_updated: new Date().toISOString(),
+      // last_synced: when the newest row was written to Neon (ingest time)
+      last_synced: (syncTime[0] as { last_synced: string | null }).last_synced,
     };
 
-    await cacheSet(cacheKey, stats, 600);
+    // Cache 30 minutes — refreshes within half an hour of a new ingest
+    await cacheSet(cacheKey, stats, 1800);
     return NextResponse.json(stats);
   } catch (err) {
     console.error("[API /stats] Unexpected error:", err);

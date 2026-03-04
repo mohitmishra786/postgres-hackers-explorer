@@ -99,7 +99,7 @@ export async function GET(req: NextRequest) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const total = (countRows as any[])[0]?.total ?? 0;
 
-    await cacheSet(cacheKey, { results: rows, total }, 3600);
+    await cacheSet(cacheKey, { results: rows, total }, 7200);
 
     return NextResponse.json({
       results: rows,

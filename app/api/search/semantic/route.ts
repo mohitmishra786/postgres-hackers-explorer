@@ -85,7 +85,7 @@ export async function POST(req: NextRequest) {
       );
 
       allResults = rows;
-      await cacheSet(cacheKey, { all_results: allResults }, 1800);
+      await cacheSet(cacheKey, { all_results: allResults }, 7200);
     }
 
     const total = allResults.length;
