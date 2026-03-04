@@ -9,7 +9,7 @@ export default function HomePage() {
           // PostgreSQL Hackers Archive Explorer
         </div>
         <h1 className="text-4xl font-bold text-[#00ff41] leading-tight mb-1">
-          pghackers.dev
+          pghackers.com
           <span className="blink text-[#00ff41]">_</span>
         </h1>
         <p className="text-[#00cc33] text-base mt-3 leading-relaxed">

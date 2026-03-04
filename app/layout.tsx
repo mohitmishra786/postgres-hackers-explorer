@@ -5,7 +5,7 @@ import StatusBar from "@/components/StatusBar";
 import ScanlineOverlay from "@/components/ScanlineOverlay";
 
 export const metadata: Metadata = {
-  title: "pghackers.dev — PostgreSQL Hackers Explorer",
+  title: "pghackers.com — PostgreSQL Hackers Explorer",
   description:
     "AI-powered reader and explorer for the pgsql-hackers mailing list archive. Browse threads, patches, and ask questions with RAG.",
   keywords: [

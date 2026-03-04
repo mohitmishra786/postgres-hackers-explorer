@@ -33,7 +33,7 @@ export default function TerminalInput({
     >
       {/* Prompt */}
       <span className="text-[#004d14] flex-shrink-0 select-none">
-        pghackers.dev &gt;
+        pghackers.com &gt;
       </span>
 
       {/* Input */}

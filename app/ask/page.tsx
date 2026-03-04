@@ -88,7 +88,7 @@ function AskPageInner() {
       {/* Main terminal input */}
       <div className="retro-card p-4 mb-6">
         <div className="flex items-center gap-2 mb-3">
-          <span className="text-[#004d14] text-[11px]">pghackers.dev &gt;</span>
+          <span className="text-[#004d14] text-[11px]">pghackers.com &gt;</span>
           <span className="blink text-[#00ff41] text-sm">_</span>
         </div>
 

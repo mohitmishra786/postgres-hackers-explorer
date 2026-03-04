@@ -1,5 +1,5 @@
 """
-pghackers.dev — Crawler Entry Point
+pghackers.com — Crawler Entry Point
 
 Usage:
   python main.py scrape                       # crawl all HTML archive pages
@@ -228,7 +228,7 @@ def cmd_status() -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="pghackers.dev — PostgreSQL pgsql-hackers mailing list crawler",
+        description="pghackers.com — PostgreSQL pgsql-hackers mailing list crawler",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )

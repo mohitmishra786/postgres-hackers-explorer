@@ -1,5 +1,5 @@
 -- ============================================================
--- pghackers.dev — Neon Postgres Schema
+-- pghackers.com — Neon Postgres Schema
 -- Run this once in the Neon SQL editor (or psql) to set up the database.
 -- No Supabase-specific extensions (auth, RLS) — plain Postgres.
 -- ============================================================
