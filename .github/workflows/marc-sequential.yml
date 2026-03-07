@@ -1,0 +1,203 @@
+name: MARC Sequential Crawl
+
+# ---------------------------------------------------------------------------
+# Self-triggering sequential month crawler.
+#
+# Processes ONE month per run (scrape + embed), then automatically triggers
+# itself for the next month — so the full archive is crawled one month at a
+# time without ever hitting GitHub's 6-hour job limit or MARC.info rate limits.
+#
+# HOW TO START:
+#   Actions → "MARC Sequential Crawl" → Run workflow
+#   Set `month`    = first month you want  (e.g. 2025/01)
+#   Set `end_month`= last  month you want  (e.g. 2025/12)
+#   Leave everything else as default.
+#
+# HOW IT WORKS:
+#   1. Scrapes `month` from MARC.info (prev-in-list, all emails).
+#   2. Embeds + ingests into Neon.
+#   3. If `month` < `end_month`, triggers a new run of THIS workflow
+#      with month advanced by one and the same end_month.
+#   4. Stops when month == end_month (that month is processed then done).
+#
+# RESUME AFTER FAILURE:
+#   Just re-trigger with the month that failed (or the next one).
+#   DB upserts are idempotent so re-running a completed month is safe.
+#
+# Required repository secrets:
+#   DATABASE_URL_UNPOOLED   Neon unpooled connection string
+#   DATABASE_URL            Neon pooled connection string
+#   GITHUB_TOKEN            Auto-provided by Actions (for self-trigger)
+#   GROQ_API_KEY            Optional — only for summarize=true
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+
+      month:
+        description: "Month to process  YYYY/MM  (e.g. 2025/01)"
+        required: true
+        default: "2025/01"
+
+      end_month:
+        description: "Last month to process  YYYY/MM  (e.g. 2025/12). Inclusive."
+        required: true
+        default: "2025/12"
+
+      embedding_provider:
+        description: "Embedding backend"
+        required: false
+        default: "fastembed"
+        type: choice
+        options:
+          - fastembed
+          - openai
+
+      summarize:
+        description: "Generate Groq AI thread summaries after ingestion."
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+      clear_db:
+        description: "Truncate DB before this month (only use on the very first run)."
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+# Allow GITHUB_TOKEN to trigger new workflow runs (needed for self-trigger in step 9)
+permissions:
+  actions: write
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  crawl-month:
+    name: "Crawl ${{ github.event.inputs.month }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python ────────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: crawler/requirements.txt
+
+      - name: Install dependencies
+        working-directory: crawler
+        run: pip install -r requirements.txt
+
+      # ── 3. Cache fastembed model ─────────────────────────────────────────
+      - name: Restore fastembed model cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: fastembed-bge-small-en-v1.5
+
+      # ── 4. Optionally clear DB (first run only) ──────────────────────────
+      - name: Clear DB
+        if: github.event.inputs.clear_db == 'true'
+        working-directory: crawler
+        env:
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          DATABASE_URL:          ${{ secrets.DATABASE_URL }}
+        run: python main.py clear-db
+
+      # ── 5. Scrape this month ─────────────────────────────────────────────
+      - name: "Scrape MARC.info — ${{ github.event.inputs.month }}"
+        working-directory: crawler
+        env:
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          DATABASE_URL:          ${{ secrets.DATABASE_URL }}
+        run: |
+          echo "Scraping ${{ github.event.inputs.month }}"
+          python main.py marc-scrape --only "${{ github.event.inputs.month }}"
+
+      # ── 6. Embed + ingest ────────────────────────────────────────────────
+      - name: "Embed + ingest — ${{ github.event.inputs.month }}"
+        working-directory: crawler
+        env:
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          DATABASE_URL:          ${{ secrets.DATABASE_URL }}
+          GROQ_API_KEY:          ${{ secrets.GROQ_API_KEY }}
+          OPENAI_API_KEY:        ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          ARGS="--provider ${{ github.event.inputs.embedding_provider }} --from ${{ github.event.inputs.month }}"
+          if [ "${{ github.event.inputs.summarize }}" = "true" ]; then
+            ARGS="$ARGS --summarize"
+          fi
+          python main.py embed $ARGS
+
+      # ── 7. Upload dropped URLs ───────────────────────────────────────────
+      - name: Upload dropped URLs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dropped-${{ github.event.inputs.month }}
+          path: crawler/output/dropped.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # ── 8. Print status ──────────────────────────────────────────────────
+      - name: Print DB status
+        if: always()
+        working-directory: crawler
+        env:
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          DATABASE_URL:          ${{ secrets.DATABASE_URL }}
+        run: python main.py status
+
+      # ── 9. Advance to next month and self-trigger ────────────────────────
+      - name: Trigger next month
+        # Only runs if the scrape+embed succeeded AND we haven't reached end_month
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CURRENT="${{ github.event.inputs.month }}"
+          END="${{ github.event.inputs.end_month }}"
+
+          # Compute next month (YYYY/MM → YYYY/MM)
+          YEAR="${CURRENT:0:4}"
+          MON="${CURRENT:5:2}"
+
+          if [ "$MON" = "12" ]; then
+            NEXT_YEAR=$((YEAR + 1))
+            NEXT="${NEXT_YEAR}/01"
+          else
+            NEXT_MON=$(printf "%02d" $((10#$MON + 1)))
+            NEXT="${YEAR}/${NEXT_MON}"
+          fi
+
+          echo "Current: $CURRENT  |  End: $END  |  Next: $NEXT"
+
+          if [[ "$CURRENT" < "$END" ]]; then
+            echo "Triggering next run for $NEXT ..."
+            gh workflow run marc-sequential.yml \
+              --ref "${{ github.ref_name }}" \
+              -f month="$NEXT" \
+              -f end_month="$END" \
+              -f embedding_provider="${{ github.event.inputs.embedding_provider }}" \
+              -f summarize="${{ github.event.inputs.summarize }}" \
+              -f clear_db="false"
+            echo "Triggered: $NEXT → $END"
+          else
+            echo "Reached end_month ($END). Sequential crawl complete."
+          fi
