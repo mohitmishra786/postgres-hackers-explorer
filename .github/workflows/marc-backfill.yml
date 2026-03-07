@@ -1,0 +1,240 @@
+name: MARC Archive Backfill
+
+# ---------------------------------------------------------------------------
+# Manually trigger a MARC.info scrape + embed run from the GitHub Actions UI.
+# Uses "prev in list" chaining to retrieve ALL emails (no 600/month cap).
+#
+# Three ways to specify the range (in order of precedence):
+#
+#   1. Single month   — set `month` to YYYY/MM  (e.g. 2026/03)
+#   2. Single year    — set `year`  to YYYY      (e.g. 2026)
+#   3. Year range     — set `from_year` + `to_year`  (e.g. 2021 → 2025)
+#
+# If more than one mode is filled in, the highest-precedence one wins.
+#
+# Required repository secrets (Settings → Secrets → Actions):
+#   DATABASE_URL_UNPOOLED   Neon unpooled Postgres connection string
+#   DATABASE_URL            Neon pooled connection string (fallback)
+#   GROQ_API_KEY            Optional — only needed when summarize=true
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+
+      # ── Mode 1: exact single month ────────────────────────────────────────
+      month:
+        description: "Single month  YYYY/MM  (e.g. 2026/03). Highest priority."
+        required: false
+        default: ""
+
+      # ── Mode 2: whole year ────────────────────────────────────────────────
+      year:
+        description: "Whole year  YYYY  (e.g. 2026). Ignored when month is set."
+        required: false
+        default: ""
+
+      # ── Mode 3: year range ────────────────────────────────────────────────
+      from_year:
+        description: "Start year  YYYY  (e.g. 2021). Ignored when month or year is set."
+        required: false
+        default: ""
+
+      to_year:
+        description: "End year  YYYY  (e.g. 2025). Defaults to from_year when omitted."
+        required: false
+        default: ""
+
+      # ── Pipeline options ──────────────────────────────────────────────────
+      skip_scrape:
+        description: "Skip scrape — re-embed a previously cached JSONL (useful if only embed failed)."
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+      clear_db:
+        description: "Truncate emails/threads/authors/patches before ingesting (fresh start)."
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+      summarize:
+        description: "Generate Groq AI thread summaries after ingestion."
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+      embedding_provider:
+        description: "Embedding backend (fastembed = local, no API key needed)."
+        required: false
+        default: "fastembed"
+        type: choice
+        options:
+          - fastembed
+          - openai
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  marc-backfill:
+    name: "MARC backfill"
+    runs-on: ubuntu-latest
+    # GitHub free-tier cap is 6 h = 360 min; leave a 10-min buffer.
+    # MARC crawl is slower than postgresql.org (2 reqs/email + polite delay).
+    timeout-minutes: 350
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python setup ──────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: crawler/requirements.txt
+
+      - name: Install Python dependencies
+        working-directory: crawler
+        run: pip install -r requirements.txt
+
+      # ── 3. Cache fastembed model (~150 MB) ───────────────────────────────
+      - name: Restore fastembed model cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: fastembed-bge-small-en-v1.5
+
+      # ── 4. Resolve period range ──────────────────────────────────────────
+      - name: Resolve period range
+        id: range
+        shell: bash
+        run: |
+          MONTH="${{ github.event.inputs.month }}"
+          YEAR="${{ github.event.inputs.year }}"
+          FROM_Y="${{ github.event.inputs.from_year }}"
+          TO_Y="${{ github.event.inputs.to_year }}"
+
+          if [ -n "$MONTH" ]; then
+            # Mode 1: exact month
+            FROM_P="$MONTH"
+            TO_P="$MONTH"
+          elif [ -n "$YEAR" ]; then
+            # Mode 2: whole year
+            FROM_P="${YEAR}/01"
+            TO_P="${YEAR}/12"
+          elif [ -n "$FROM_Y" ]; then
+            # Mode 3: year range
+            TO_Y="${TO_Y:-$FROM_Y}"
+            FROM_P="${FROM_Y}/01"
+            TO_P="${TO_Y}/12"
+          else
+            echo "::error::No range specified. Set 'month', 'year', or 'from_year'."
+            exit 1
+          fi
+
+          echo "from_period=$FROM_P" >> "$GITHUB_OUTPUT"
+          echo "to_period=$TO_P"     >> "$GITHUB_OUTPUT"
+
+          echo "========================================="
+          echo "  MARC backfill range:  $FROM_P  →  $TO_P"
+          echo "  skip_scrape         :  ${{ github.event.inputs.skip_scrape }}"
+          echo "  clear_db            :  ${{ github.event.inputs.clear_db }}"
+          echo "  summarize           :  ${{ github.event.inputs.summarize }}"
+          echo "  provider            :  ${{ github.event.inputs.embedding_provider }}"
+          echo "========================================="
+
+      # ── 5. Optionally clear DB ───────────────────────────────────────────
+      - name: Clear DB (truncate all tables)
+        if: github.event.inputs.clear_db == 'true'
+        working-directory: crawler
+        env:
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          DATABASE_URL:          ${{ secrets.DATABASE_URL }}
+        run: python main.py clear-db
+
+      # ── 6. Restore JSONL cache (lets embed be retried without re-scraping) ─
+      - name: Restore crawl output cache
+        if: github.event.inputs.skip_scrape != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: crawler/output
+          key: marc-backfill-${{ steps.range.outputs.from_period }}-${{ steps.range.outputs.to_period }}-${{ github.run_id }}
+          restore-keys: |
+            marc-backfill-${{ steps.range.outputs.from_period }}-${{ steps.range.outputs.to_period }}-
+
+      # ── 7. Scrape via MARC.info ──────────────────────────────────────────
+      - name: Scrape MARC.info archive
+        if: github.event.inputs.skip_scrape != 'true'
+        working-directory: crawler
+        env:
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          DATABASE_URL:          ${{ secrets.DATABASE_URL }}
+        run: |
+          FROM="${{ steps.range.outputs.from_period }}"
+          TO="${{ steps.range.outputs.to_period }}"
+          echo "Scraping MARC.info  $FROM  →  $TO"
+          python main.py marc-scrape --from "$FROM" --to "$TO"
+
+      # ── 8. Persist JSONL so embed can be retried without re-scraping ─────
+      - name: Save crawl output cache
+        if: github.event.inputs.skip_scrape != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: crawler/output
+          key: marc-backfill-${{ steps.range.outputs.from_period }}-${{ steps.range.outputs.to_period }}-${{ github.run_id }}
+
+      # ── 9. Embed + ingest into Neon ──────────────────────────────────────
+      - name: Embed and ingest into Neon
+        working-directory: crawler
+        env:
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          DATABASE_URL:          ${{ secrets.DATABASE_URL }}
+          GROQ_API_KEY:          ${{ secrets.GROQ_API_KEY }}
+          OPENAI_API_KEY:        ${{ secrets.OPENAI_API_KEY }}
+          EMBEDDING_PROVIDER:    ${{ github.event.inputs.embedding_provider }}
+        run: |
+          PROVIDER="${{ github.event.inputs.embedding_provider }}"
+          SUMMARIZE="${{ github.event.inputs.summarize }}"
+          FROM="${{ steps.range.outputs.from_period }}"
+
+          echo "Embedding  (provider=$PROVIDER  summarize=$SUMMARIZE  from=$FROM)"
+
+          ARGS="--provider $PROVIDER --from $FROM"
+          if [ "$SUMMARIZE" = "true" ]; then
+            ARGS="$ARGS --summarize"
+          fi
+
+          python main.py embed $ARGS
+
+      # ── 10. Upload dropped.jsonl as artifact if any URLs were dropped ────
+      - name: Upload dropped URLs artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: marc-dropped-urls-${{ steps.range.outputs.from_period }}-${{ steps.range.outputs.to_period }}
+          path: crawler/output/dropped.jsonl
+          if-no-files-found: ignore
+          retention-days: 30
+
+      # ── 11. Status summary ───────────────────────────────────────────────
+      - name: Print crawl status
+        if: always()
+        working-directory: crawler
+        env:
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          DATABASE_URL:          ${{ secrets.DATABASE_URL }}
+        run: python main.py status

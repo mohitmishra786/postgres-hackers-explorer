@@ -2,14 +2,19 @@
 pghackers.com — Crawler Entry Point
 
 Usage:
-  python main.py scrape                       # crawl all HTML archive pages
+  python main.py scrape                       # crawl all HTML archive pages (postgresql.org, 200/mo cap)
   python main.py scrape --from 2024/01        # crawl from a specific month
   python main.py scrape --only 2026/02        # crawl only one specific month
   python main.py incremental                  # only fetch months newer than last crawl
+  python main.py marc-scrape                  # crawl MARC.info — full archive, no 200/mo cap
+  python main.py marc-scrape --from 2026/01   # crawl MARC.info from a specific month
+  python main.py marc-scrape --only 2026/02   # crawl MARC.info for one month only
+  python main.py marc-scrape --to 2026/12     # crawl MARC.info up to a month
   python main.py embed                        # embed + ingest all crawled emails into Neon
   python main.py embed --from 2024/01         # embed emails from this month onward
   python main.py embed --provider openai      # use OpenAI embeddings (default: fastembed)
   python main.py summarize                    # generate Groq AI summaries for all threads
+  python main.py clear-db                     # TRUNCATE all tables (run before full re-crawl)
   python main.py status                       # print crawl state summary
 """
 import argparse
@@ -21,7 +26,7 @@ from typing import Optional
 
 import httpx
 
-from config import BASE_URL, MAX_CONCURRENT_MONTHS, OUTPUT_JSON_PATH, STATE_FILE_PATH
+from config import BASE_URL, DATABASE_URL, MAX_CONCURRENT_MONTHS, OUTPUT_JSON_PATH, STATE_FILE_PATH
 from logger import setup_logger
 from scraper import (
     check_robots_txt,
@@ -125,6 +130,157 @@ async def cmd_scrape(
         errors=errors,
         duration_seconds=round(time.time() - start, 1),
     )
+
+
+# ---------------------------------------------------------------------------
+# marc-scrape — full archive via MARC.info (no 200/month cap)
+# ---------------------------------------------------------------------------
+
+async def cmd_marc_scrape(
+    from_period: Optional[str] = None,
+    to_period: Optional[str] = None,
+    only_period: Optional[str] = None,
+) -> None:
+    """
+    Crawl pgsql-hackers from MARC.info with full per-month email counts.
+
+    MARC.info has no 200-email cap — Jan 2025 alone has 2,450 messages.
+    Supports resume: already-completed months (tracked in crawl_state.json)
+    are skipped automatically.
+
+    Rate limiting: CRAWL_DELAY_SECONDS (1.5s) between requests + 3 concurrent
+    max via semaphore + retry with backoff [2, 3, 5, 8, 15]s × 5 attempts.
+    """
+    from marc_scraper import get_all_marc_month_periods, run_marc_scrape_month
+
+    start = time.time()
+    total_emails = 0
+    errors = 0
+
+    state = load_crawl_state()
+    completed = set(state.get("completed_months", []))
+
+    async with httpx.AsyncClient(
+        headers={
+            "User-Agent": (
+                "pghackers-explorer/1.0 "
+                "(open-source archive reader; "
+                "github.com/mohitmishra786/postgres-hackers-explorer)"
+            )
+        },
+        follow_redirects=True,
+        timeout=30,
+    ) as client:
+
+        periods = await get_all_marc_month_periods(
+            client,
+            from_period=from_period,
+            to_period=to_period,
+            only_period=only_period,
+        )
+
+        pending = [(p, y, m) for p, y, m in periods if p not in completed]
+        logger.info(
+            "marc_scrape_plan",
+            total_months=len(periods),
+            pending=len(pending),
+            already_done=len(completed_months := completed),
+        )
+
+        for period, year, month in pending:
+            try:
+                count = await run_marc_scrape_month(client, period, year, month)
+                total_emails += count
+
+                # Checkpoint after each month — safe to resume if interrupted
+                s = load_crawl_state()
+                done = set(s.get("completed_months", []))
+                done.add(period)
+                s["completed_months"] = sorted(done)
+                s["last_crawl"] = datetime.now(tz=timezone.utc).isoformat()
+                s["source"] = "marc.info"
+                save_crawl_state(s)
+
+                logger.info(
+                    "marc_month_checkpointed",
+                    period=period,
+                    emails=count,
+                    total_so_far=total_emails,
+                )
+            except Exception as e:
+                logger.error("marc_month_failed", period=period, error=str(e))
+                errors += 1
+
+    # Reconstruct thread structure from JSONL
+    logger.info("starting_thread_reconstruction")
+    all_emails = read_all_emails()
+    updated = reconstruct_threads(all_emails)
+    write_all_emails(updated)
+
+    unique_roots = len({e.get("thread_root_id") for e in updated if e.get("thread_root_id")})
+
+    logger.info(
+        "marc_scrape_complete",
+        total_emails=total_emails,
+        total_threads=unique_roots,
+        months_processed=len(pending),
+        errors=errors,
+        duration_seconds=round(time.time() - start, 1),
+    )
+
+
+# ---------------------------------------------------------------------------
+# clear-db — TRUNCATE all tables (run before a full re-crawl from scratch)
+# ---------------------------------------------------------------------------
+
+def cmd_clear_db(confirm: bool = False) -> None:
+    """
+    TRUNCATE emails, threads, authors, patches and reset crawl state.
+
+    This is irreversible. Use before a full re-crawl from MARC.info
+    to avoid stale data from postgresql.org (200/month capped) crawl.
+    """
+    import psycopg2
+    import os
+
+    if not confirm:
+        ans = input(
+            "\n⚠️  This will DELETE all rows from emails, threads, authors, patches.\n"
+            "   Also resets output/crawl_state.json and output/emails.jsonl.\n"
+            "   Type 'yes' to confirm: "
+        ).strip().lower()
+        if ans != "yes":
+            print("Aborted.")
+            return
+
+    # Clear DB tables
+    db_url = DATABASE_URL
+    if not db_url:
+        raise RuntimeError("DATABASE_URL not set")
+
+    conn = psycopg2.connect(db_url, connect_timeout=30)
+    try:
+        with conn.cursor() as cur:
+            logger.info("truncating_tables")
+            cur.execute("""
+                TRUNCATE TABLE patches, authors, threads, emails
+                RESTART IDENTITY CASCADE
+            """)
+        conn.commit()
+        logger.info("tables_truncated")
+    finally:
+        conn.close()
+
+    # Reset JSONL and crawl state
+    import os as _os
+    if _os.path.exists(OUTPUT_JSON_PATH):
+        _os.remove(OUTPUT_JSON_PATH)
+        logger.info("deleted_jsonl", path=OUTPUT_JSON_PATH)
+
+    save_crawl_state({"completed_months": [], "last_crawl": None, "source": None})
+    logger.info("crawl_state_reset")
+
+    print("✓ Database cleared. Ready for full re-crawl.")
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +423,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only fetch months newer than the last completed crawl",
     )
 
+    # -- marc-scrape --
+    marc_parser = subparsers.add_parser(
+        "marc-scrape",
+        help="Crawl full archive from MARC.info (no 200/month cap, resumable)",
+    )
+    marc_parser.add_argument(
+        "--from", dest="from_period", metavar="YYYY/MM", default=None,
+        help="Start from this month (e.g. 2026/01)",
+    )
+    marc_parser.add_argument(
+        "--to", dest="to_period", metavar="YYYY/MM", default=None,
+        help="Stop at this month inclusive (e.g. 2026/12)",
+    )
+    marc_parser.add_argument(
+        "--only", dest="only_period", metavar="YYYY/MM", default=None,
+        help="Crawl exactly one month (e.g. 2026/02)",
+    )
+
+    # -- clear-db --
+    clear_parser = subparsers.add_parser(
+        "clear-db",
+        help="TRUNCATE all DB tables + reset crawl state (irreversible)",
+    )
+    clear_parser.add_argument(
+        "--yes", dest="confirm", action="store_true",
+        help="Skip interactive confirmation prompt",
+    )
+
     # -- embed --
     embed_parser = subparsers.add_parser(
         "embed",
@@ -332,6 +516,16 @@ def main() -> None:
 
     elif args.command == "incremental":
         asyncio.run(cmd_incremental())
+
+    elif args.command == "marc-scrape":
+        asyncio.run(cmd_marc_scrape(
+            from_period=args.from_period,
+            to_period=args.to_period,
+            only_period=args.only_period,
+        ))
+
+    elif args.command == "clear-db":
+        cmd_clear_db(confirm=getattr(args, "confirm", False))
 
     elif args.command == "embed":
         asyncio.run(cmd_embed(

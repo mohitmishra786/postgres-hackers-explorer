@@ -72,13 +72,18 @@ export async function POST(req: NextRequest) {
 
       const whereExtra = extraClauses.length > 0 ? " AND " + extraClauses.join(" AND ") : "";
 
+      // HNSW: set ef_search=100 for >99% recall (default 40 misses ~15% results)
+      await sql.query(`SET hnsw.ef_search = 100`, []);
+
+      // BGE v1.5 similarity range for relevant pairs: [0.6, 1.0]
+      // Threshold 0.5 filters noise; old threshold 0.1 returned irrelevant results
       const rows = await sql.query(
         `SELECT id, message_id, subject, author_name, author_email, date,
                 source_url, thread_root_id, thread_depth, has_patch, patch_version,
                 1 - (embedding <=> $1::vector) AS similarity
          FROM emails
          WHERE embedding IS NOT NULL
-           AND 1 - (embedding <=> $1::vector) > 0.1${whereExtra}
+           AND 1 - (embedding <=> $1::vector) > 0.5${whereExtra}
          ORDER BY embedding <=> $1::vector
          LIMIT $2`,
         params

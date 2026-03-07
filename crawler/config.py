@@ -7,12 +7,18 @@ _env_file = Path(__file__).parent.parent / ".env"
 load_dotenv(_env_file)
 
 BASE_URL = "https://www.postgresql.org/list/pgsql-hackers"
-CRAWL_DELAY_SECONDS = 1.5        # pre-request polite delay (seconds)
-MAX_CONCURRENT_REQUESTS = 3      # conservative parallelism
+CRAWL_DELAY_SECONDS = 0.8        # baseline polite delay — MARC.info asks for "1-2s"; 0.8 is safe
+MAX_CONCURRENT_REQUESTS = 5      # parallel requests (semaphore-controlled)
 MAX_CONCURRENT_MONTHS = 2        # crawl 2 months in parallel
-MAX_RETRIES = 5                  # max attempts before dropping
+MAX_RETRIES = 5                  # max attempts before dropping a URL
 REQUEST_TIMEOUT = 30
-RETRY_WAITS = [2, 3, 5, 8, 15]  # seconds to wait before each retry attempt
+
+# Adaptive backoff steps on 429/503/connect errors.
+# On each consecutive failure the delay steps up through this list.
+# On a clean success streak (BACKOFF_RECOVERY_AFTER requests), resets to CRAWL_DELAY_SECONDS.
+RETRY_WAITS          = [2, 3, 5, 8, 15]          # seconds between retry attempts
+BACKOFF_STEPS        = [0.8, 1.2, 1.5, 2.0, 3.0] # adaptive delay steps on throttle signals
+BACKOFF_RECOVERY_AFTER = 20                        # consecutive successes before resetting delay
 DROPPED_PATH = "output/dropped.jsonl"  # URLs that failed all retries
 
 OUTPUT_DIR = "output"

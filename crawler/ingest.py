@@ -82,9 +82,21 @@ def truncate_to_tokens(text: str, max_tokens: int = MAX_EMBEDDING_TOKENS) -> tup
 
 
 def build_embedding_text(email: dict) -> str:
-    subject = email.get("subject", "") or ""
-    body = email.get("body_new_content", "") or email.get("body_clean", "") or ""
-    return f"{subject}\n\n{body}".strip()
+    """
+    Build the document text for embedding.
+
+    BGE best practice (from official BAAI/bge-small-en-v1.5 docs):
+    - Documents/passages: embed as-is, NO instruction prefix.
+    - Only queries get the prefix "Represent this sentence for searching relevant passages: "
+    - Subject prepended so retrieval works on thread-topic queries too.
+    - Capped at ~2000 chars: BGE-small has a 512-token window; beyond that
+      the model truncates anyway, so we save compute and keep signal dense.
+    """
+    subject = (email.get("subject", "") or "").strip()
+    body = (email.get("body_new_content", "") or email.get("body_clean", "") or "").strip()
+    # Join subject + body; truncate body to keep total well within 512 tokens (~2000 chars)
+    combined = f"{subject}\n\n{body}"
+    return combined[:2000].strip()
 
 
 # ---------------------------------------------------------------------------
@@ -101,8 +113,16 @@ async def embed_batch_openai(texts: list[str]) -> list[list[float]]:
 
 
 def embed_batch_fastembed(texts: list[str]) -> list[list[float]]:
-    """Local fastembed — BAAI/bge-small-en-v1.5, 384 dims, no API key."""
+    """
+    Local fastembed — BAAI/bge-small-en-v1.5, 384 dims, no API key.
+
+    fastembed automatically:
+    - Normalises embeddings to unit length (required for cosine similarity)
+    - Handles tokenisation and CLS pooling correctly
+    - Does NOT add any instruction prefix (correct for documents/passages)
+    """
     from fastembed import TextEmbedding  # lazy import
+    # Re-use model across batches within a run for efficiency
     model = TextEmbedding(model_name=FASTEMBED_MODEL)
     return [emb.tolist() for emb in model.embed(texts)]
 
@@ -163,6 +183,24 @@ def _to_pg_array(items: list) -> str:
     return "{" + ",".join(escaped) + "}"
 
 
+# PostgreSQL rejects NUL bytes (0x00) in text columns, and the tsvector index
+# has a hard cap of 1 MB (1,048,575 bytes).  Strip NUL bytes everywhere and
+# truncate fields that feed into the FTS index.
+_FTS_MAX_BYTES = 900_000   # leave headroom below the 1,048,575-byte tsvector cap
+
+
+def sanitize_text(text: str | None, max_bytes: int | None = None) -> str | None:
+    """Strip NUL bytes from text and optionally truncate to max_bytes (UTF-8)."""
+    if text is None:
+        return None
+    text = text.replace("\x00", "")          # PostgreSQL rejects 0x00 in text
+    if max_bytes is not None:
+        encoded = text.encode("utf-8")
+        if len(encoded) > max_bytes:
+            text = encoded[:max_bytes].decode("utf-8", errors="ignore")
+    return text
+
+
 def email_to_row(email: dict) -> tuple:
     """Return a tuple matching the INSERT column order below."""
     embedding = email.get("embedding")
@@ -176,21 +214,21 @@ def email_to_row(email: dict) -> tuple:
         except Exception:
             refs = []
     return (
-        email.get("message_id", ""),
-        email.get("in_reply_to"),
+        sanitize_text(email.get("message_id", "")),
+        sanitize_text(email.get("in_reply_to")),
         _to_pg_array(refs),                                # text[] as Postgres array literal
-        email.get("subject", ""),
-        email.get("author_name"),
-        email.get("author_email_obfuscated"),
+        sanitize_text(email.get("subject", "")),
+        sanitize_text(email.get("author_name")),
+        sanitize_text(email.get("author_email_obfuscated")),
         email.get("date"),
-        email.get("body_clean"),
-        email.get("body_new_content"),
-        email.get("source_url"),
-        email.get("month_period"),
-        email.get("thread_root_id"),
+        sanitize_text(email.get("body_clean"), max_bytes=_FTS_MAX_BYTES),        # FTS index cap
+        sanitize_text(email.get("body_new_content"), max_bytes=_FTS_MAX_BYTES),  # FTS index cap
+        sanitize_text(email.get("source_url")),
+        sanitize_text(email.get("month_period")),
+        sanitize_text(email.get("thread_root_id")),
         email.get("thread_depth", 0),
         bool(email.get("has_patch", False)),
-        email.get("patch_version"),
+        sanitize_text(email.get("patch_version")),
         _to_pg_array(email.get("git_commit_refs") or []),  # text[] as Postgres array literal
         embedding_str,
     )
@@ -204,10 +242,7 @@ def upsert_emails_neon(emails: list[dict], conn: psycopg2.extensions.connection)
         for i in range(0, len(emails), BATCH):
             batch = emails[i: i + BATCH]
             rows = [email_to_row(e) for e in batch]
-            try:
-                psycopg2.extras.execute_values(
-                    cur,
-                    """
+            INSERT_SQL = """
                     INSERT INTO emails (
                         message_id, in_reply_to, references_ids, subject,
                         author_name, author_email, date, body_clean,
@@ -232,22 +267,37 @@ def upsert_emails_neon(emails: list[dict], conn: psycopg2.extensions.connection)
                         patch_version    = EXCLUDED.patch_version,
                         git_commit_refs  = EXCLUDED.git_commit_refs,
                         embedding        = EXCLUDED.embedding
-                    """,
-                    rows,
-                    template="""(
+                    """
+            TEMPLATE = """(
                         %s, %s, %s::text[], %s,
                         %s, %s, %s::timestamptz, %s,
                         %s, %s, %s,
                         %s, %s, %s, %s,
                         %s::text[], %s::vector
-                    )""",
-                )
+                    )"""
+            try:
+                psycopg2.extras.execute_values(cur, INSERT_SQL, rows, template=TEMPLATE)
                 conn.commit()
                 total_upserted += len(rows)
                 logger.info("upserted_email_batch", batch_start=i, count=len(rows), total=total_upserted)
             except Exception as e:
                 conn.rollback()
-                logger.error("email_upsert_failed", batch_start=i, error=str(e))
+                logger.warning("email_batch_failed_trying_one_by_one", batch_start=i, error=str(e))
+                # Fall back to row-by-row so one bad email doesn't lose the whole batch
+                for j, row in enumerate(rows):
+                    try:
+                        psycopg2.extras.execute_values(cur, INSERT_SQL, [row], template=TEMPLATE)
+                        conn.commit()
+                        total_upserted += 1
+                    except Exception as row_err:
+                        conn.rollback()
+                        logger.error(
+                            "email_row_failed",
+                            batch_start=i,
+                            row_index=j,
+                            message_id=row[0],
+                            error=str(row_err),
+                        )
 
     return total_upserted
 

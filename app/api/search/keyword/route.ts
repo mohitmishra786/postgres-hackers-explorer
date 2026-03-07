@@ -77,12 +77,15 @@ export async function GET(req: NextRequest) {
     const tsvec = `to_tsvector('english', coalesce(subject,'') || ' ' || coalesce(body_new_content,''))`;
     const tsq   = `websearch_to_tsquery('english', $1)`;
 
+    // ts_rank_cd (cover density): rewards proximity of query terms to each other.
+    // Flag 32: normalise by rank of closest match — prevents long emails dominating.
+    // websearch_to_tsquery: supports quoted phrases, AND/OR/-, like Google syntax.
     const [rows, countRows] = await Promise.all([
       sql.query(
         `SELECT id, message_id, subject, author_name, author_email, date,
                 body_new_content, source_url, thread_root_id, thread_depth,
                 has_patch, patch_version,
-                ts_rank(${tsvec}, ${tsq}) AS rank
+                ts_rank_cd(${tsvec}, ${tsq}, 32) AS rank
          FROM emails
          WHERE ${tsvec} @@ ${tsq}${whereExtra}
          ORDER BY rank DESC

@@ -16,6 +16,7 @@ class RawEmail(BaseModel):
     body_new_content: str     # only lines the author wrote (no > prefix lines)
     source_url: str
     month_period: str         # "2024/03"
+    marc_thread_id: Optional[str] = None   # MARC ?t=THREADID — stable thread group key
     thread_root_id: Optional[str] = None  # filled in post-processing
     thread_depth: int = 0
     has_patch: bool = False
