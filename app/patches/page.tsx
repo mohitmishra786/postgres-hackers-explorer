@@ -31,12 +31,6 @@ export default function PatchesPage() {
 
   const totalPages = Math.ceil(total / 30);
 
-  // Aggregate patch stats
-  const committed = threads.filter((t) => t.is_committed).length;
-  const inReview = threads.filter(
-    (t) => t.commitfest_status === "Needs Review"
-  ).length;
-
   return (
     <div className="p-6 max-w-5xl">
       {/* Header */}
@@ -55,18 +49,6 @@ export default function PatchesPage() {
         <span>
           total:{" "}
           <span className="text-[#00ff41]">{total.toLocaleString()}</span>
-        </span>
-        <span>
-          committed:{" "}
-          <span className="text-white">{committed}</span>
-        </span>
-        <span>
-          in review:{" "}
-          <span className="text-[#ffaa00]">{inReview}</span>
-        </span>
-        <span>
-          other:{" "}
-          <span className="text-[#004d14]">{total - committed - inReview}</span>
         </span>
       </div>
 

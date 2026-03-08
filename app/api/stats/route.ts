@@ -28,7 +28,7 @@ export async function GET() {
         FROM emails
       `,
       sql`
-        SELECT COALESCE(SUM(patch_count), 0)::int AS total_patches
+        SELECT COUNT(*)::int AS total_patches
         FROM threads
         WHERE has_patches = true
       `,
