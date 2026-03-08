@@ -533,12 +533,23 @@ def parse_marc_email_page(
         font_block = soup.find("font", attrs={"size": "+1"})
         if font_block:
             block_text = font_block.get_text("\n")
-            for line in block_text.splitlines():
-                line = line.strip()
+            lines = [l.strip() for l in block_text.splitlines()]
+            for idx, line in enumerate(lines):
+                def _next_line_val(prefix: str) -> str:
+                    """Value after prefix on same line; if empty, take next non-empty line."""
+                    val = line[len(prefix):].strip()
+                    if not val:
+                        for nxt in lines[idx + 1:]:
+                            nxt = nxt.strip()
+                            if nxt:
+                                val = nxt
+                                break
+                    return val
+
                 if line.startswith("Subject:"):
-                    subject = line[len("Subject:"):].strip()
+                    subject = _next_line_val("Subject:")
                 elif line.startswith("From:"):
-                    from_val = line[len("From:"):].strip()
+                    from_val = _next_line_val("From:")
                     m = re.match(r"^(.+?)\s+<([^>]+)>", from_val)
                     if m:
                         author_name      = m.group(1).strip()
@@ -546,13 +557,13 @@ def parse_marc_email_page(
                     else:
                         author_name = from_val.strip()
                 elif line.startswith("Date:"):
-                    date_str = line[len("Date:"):].strip()
+                    date_str = _next_line_val("Date:")
                 elif line.startswith("Message-ID:"):
-                    message_id = _normalise_message_id(line[len("Message-ID:"):].strip())
+                    message_id = _normalise_message_id(_next_line_val("Message-ID:"))
                 elif line.startswith("In-Reply-To:"):
-                    in_reply_to = _normalise_message_id(line[len("In-Reply-To:"):].strip())
+                    in_reply_to = _normalise_message_id(_next_line_val("In-Reply-To:"))
                 elif line.startswith("References:"):
-                    references_raw = line[len("References:"):].strip()
+                    references_raw = _next_line_val("References:")
 
             # Extract message_id from href if not found in text
             if not message_id:
