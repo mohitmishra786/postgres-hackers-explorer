@@ -6,21 +6,18 @@ import { Thread } from "@/lib/db";
 import ThreadCard from "@/components/ThreadCard";
 import { RetroSpinner } from "@/components/RetroLoader";
 
-type SortOption = "recent" | "active" | "patches" | "committed";
-type FilterOption = "has_patches" | "committed" | "in_review" | "";
+type SortOption = "recent" | "active" | "patches";
+type FilterOption = "has_patches" | "";
 
 const SORT_OPTIONS: { value: SortOption; label: string }[] = [
   { value: "recent", label: "--sort=recent" },
   { value: "active", label: "--sort=active" },
   { value: "patches", label: "--sort=patches" },
-  { value: "committed", label: "--sort=committed" },
 ];
 
 const FILTER_OPTIONS: { value: FilterOption; label: string }[] = [
   { value: "", label: "--filter=all" },
   { value: "has_patches", label: "--filter=patches" },
-  { value: "in_review", label: "--filter=in_review" },
-  { value: "committed", label: "--filter=committed" },
 ];
 
 function ThreadsPageInner() {
@@ -36,7 +33,7 @@ function ThreadsPageInner() {
     (searchParams.get("sort") as SortOption) ?? "recent"
   );
   const [filter, setFilter] = useState<FilterOption>(
-    (searchParams.get("filter") as FilterOption) ?? ""
+    (searchParams.get("filter") as FilterOption) ?? "" as FilterOption
   );
 
   const fetchThreads = useCallback(

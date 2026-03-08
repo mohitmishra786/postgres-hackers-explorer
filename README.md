@@ -32,6 +32,10 @@ This project addresses that problem by providing:
 - [Setup](SETUP.md) - Installation and development guide
 - [API](API.md) - API endpoints reference
 
+## TODO / Next Steps
+
+- **CommitFest integration** — `commitfest_status` (`Needs Review`, `In Progress`, `Committed`) and `is_committed` columns exist in the DB but are never populated. The CommitFest API at `commitfest.postgresql.org/api/1/` returns HTML, not JSON, so a proper scraper needs to be built to parse patch status by subject/author matching. Once populated, the `--filter=in_review` and `--filter=committed` thread filters (currently removed from UI) can be restored.
+
 ## License
 
 AGPL-3.0
