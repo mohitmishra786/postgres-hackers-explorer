@@ -2,26 +2,25 @@ name: Daily Crawler
 
 on:
   schedule:
-    # Run daily at 03:00 UTC (low traffic time)
-    - cron: "0 3 * * *"
+    # Run daily at 00:00 UTC
+    - cron: "0 0 * * *"
   workflow_dispatch:
     inputs:
       command:
-        description: "Crawler command to run"
+        description: "Command to run"
         required: true
         default: "incremental"
         type: choice
         options:
-          - incremental
-          - embed
-          - summarize
-          - status
+          - incremental   # marc-scrape current month + embed (default daily job)
+          - embed         # re-embed only (no scrape)
+          - status        # print DB stats
       from_period:
-        description: "Start from period YYYY/MM (optional, used with embed)"
+        description: "Start period YYYY/MM (optional, only used with embed command)"
         required: false
         default: ""
       embedding_provider:
-        description: "Embedding provider"
+        description: "Embedding backend"
         required: false
         default: "fastembed"
         type: choice
@@ -35,111 +34,88 @@ env:
 
 jobs:
   crawl-and-ingest:
-    name: Crawl + Embed pgsql-hackers
+    name: "Daily MARC crawl + embed"
     runs-on: ubuntu-latest
     timeout-minutes: 180
 
     steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ── 2. Python ──────────────────────────────────────────────────────
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
+          cache: pip
           cache-dependency-path: crawler/requirements.txt
 
       - name: Install Python dependencies
         working-directory: crawler
         run: pip install -r requirements.txt
 
-      - name: Restore crawl output cache
+      # ── 3. Fastembed model cache ───────────────────────────────────────
+      - name: Restore fastembed model cache
         uses: actions/cache@v4
         with:
-          path: crawler/output
-          key: crawler-output-${{ github.run_id }}
-          restore-keys: |
-            crawler-output-
+          path: ~/.cache/huggingface
+          key: fastembed-bge-small-en-v1.5
 
-      - name: Compute current month period
+      # ── 4. Current month ───────────────────────────────────────────────
+      - name: Compute current month
         id: period
         run: |
-          # Current month in YYYY/MM format — used for incremental crawl & embed
           CURRENT_MONTH=$(date -u +%Y/%m)
           echo "current_month=$CURRENT_MONTH" >> "$GITHUB_OUTPUT"
           echo "Current month: $CURRENT_MONTH"
 
-      - name: Run crawler command
+      # ── 5. Scrape (incremental only) ───────────────────────────────────
+      - name: Scrape current month from MARC.info
+        if: >
+          github.event_name == 'schedule' ||
+          github.event.inputs.command == 'incremental'
         working-directory: crawler
         env:
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          EMBEDDING_PROVIDER: fastembed
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            COMMAND="${{ github.event.inputs.command }}"
-          else
-            COMMAND="incremental"
-          fi
-
-          echo "Running command: $COMMAND"
-
-          case "$COMMAND" in
-            incremental)
-              # Only crawl the current month — previously crawled months are already in Neon.
-              # The scraper is idempotent (upsert), so re-running the current month is safe.
-              MONTH="${{ steps.period.outputs.current_month }}"
-              echo "Scraping current month only: $MONTH"
-              python main.py scrape --only "$MONTH"
-              ;;
-            embed)
-              FROM="${{ github.event.inputs.from_period }}"
-              PROVIDER="${{ github.event.inputs.embedding_provider }}"
-              if [ -n "$FROM" ]; then
-                python main.py embed --provider "$PROVIDER" --from "$FROM"
-              else
-                python main.py embed --provider "$PROVIDER"
-              fi
-              ;;
-            summarize)
-              python main.py summarize
-              ;;
-            status)
-              python main.py status
-              ;;
-            *)
-              echo "Unknown command: $COMMAND"
-              exit 1
-              ;;
-          esac
-
-      - name: Embed current month emails
-        if: github.event_name == 'schedule' || github.event.inputs.command == 'incremental'
-        working-directory: crawler
-        env:
-          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          EMBEDDING_PROVIDER: fastembed
+          DATABASE_URL:          ${{ secrets.DATABASE_URL }}
         run: |
           MONTH="${{ steps.period.outputs.current_month }}"
-          echo "Embedding emails from current month: $MONTH"
-          python main.py embed --from "$MONTH"
+          echo "marc-scrape --only $MONTH"
+          python main.py marc-scrape --only "$MONTH"
 
-      - name: Print status
+      # ── 6. Embed + ingest ──────────────────────────────────────────────
+      - name: Embed and ingest into Neon
+        if: >
+          github.event_name == 'schedule' ||
+          github.event.inputs.command == 'incremental' ||
+          github.event.inputs.command == 'embed'
+        working-directory: crawler
+        env:
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          DATABASE_URL:          ${{ secrets.DATABASE_URL }}
+          OPENAI_API_KEY:        ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # For incremental (schedule or manual): embed current month
+          # For embed command: use from_period if provided, else current month
+          if [ "${{ github.event.inputs.command }}" = "embed" ] && \
+             [ -n "${{ github.event.inputs.from_period }}" ]; then
+            FROM="${{ github.event.inputs.from_period }}"
+          else
+            FROM="${{ steps.period.outputs.current_month }}"
+          fi
+
+          PROVIDER="${{ github.event.inputs.embedding_provider }}"
+          PROVIDER="${PROVIDER:-fastembed}"
+
+          echo "embed --provider $PROVIDER --from $FROM"
+          python main.py embed --provider "$PROVIDER" --from "$FROM"
+
+      # ── 7. Status ──────────────────────────────────────────────────────
+      - name: Print DB status
         if: always()
         working-directory: crawler
         env:
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL:          ${{ secrets.DATABASE_URL }}
         run: python main.py status
-
-      - name: Save crawl output cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: crawler/output
-          key: crawler-output-${{ github.run_id }}
